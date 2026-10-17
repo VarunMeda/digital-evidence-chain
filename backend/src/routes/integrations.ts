@@ -1,11 +1,11 @@
 import { Router } from "express";
 import { MongoClient } from "mongodb";
-import crypto from "node:crypto";
 import pool from "../db/mysql";
 import { requireAuth, requireRoles } from "../middleware/auth";
-import { ARTIFACT_TYPES, EXTRACTION_STATUSES, validateArtifactInput } from "../services/artifactValidation";
+import { ARTIFACT_TYPES, EXTRACTION_STATUSES } from "../services/artifactValidation";
 import { getNeo4jSettings, verifyNeo4jConnection } from "../services/neo4j";
 import { getLastNeo4jSync, Neo4jGraphNotFoundError, readGraph, syncNeo4jGraph } from "../services/neo4jGraph";
+import { ArtifactPersistenceError, persistArtifact } from "../services/artifactPersistence";
 
 const router = Router();
 router.use(requireAuth);
@@ -95,25 +95,8 @@ router.get("/artifacts/:artifactId", async (req, res) => {
 });
 
 router.post("/artifacts", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
-  let artifact;
-  try { artifact = validateArtifactInput(req.body); } catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : "Invalid artifact payload" }); }
-  try {
-    const [evidenceRows] = await pool.execute<any[]>("SELECT evidence_id, evidence_code, original_sha256, original_filename FROM evidence WHERE evidence_id=? LIMIT 1", [artifact.evidence_id]);
-    if (!evidenceRows.length) return res.status(404).json({ error: "Referenced evidence record not found" });
-    if (evidenceRows[0].original_sha256.toLowerCase() !== artifact.provenance.input_sha256) return res.status(409).json({ error: "Artifact provenance hash does not match the registered evidence" });
-    const artifactId = crypto.randomUUID();
-    const document = { artifact_id: artifactId, evidence_id: artifact.evidence_id, evidence_code: evidenceRows[0].evidence_code, artifact_type: artifact.artifact_type, source_filename: artifact.source_filename || evidenceRows[0].original_filename, fields: artifact.fields, parser: artifact.parser, observed_at: artifact.observed_at, extraction_status: artifact.extraction_status, error: artifact.error, provenance: { ...artifact.provenance, evidence_sha256: evidenceRows[0].original_sha256.toLowerCase() }, idempotency_key: artifact.idempotency_key, created_by: req.user!.userId, created_at: new Date() };
-    const result = await withMongo(async (collection) => {
-      try { await collection.insertOne(document); return { document, created: true }; }
-      catch (error: any) {
-        if (error?.code !== 11000) throw error;
-        const existing = await collection.findOne({ idempotency_key: artifact.idempotency_key }, { projection: { _id: 0 } });
-        if (!existing) throw error;
-        return { document: existing, created: false };
-      }
-    });
-    return res.status(result.created ? 201 : 200).json(result);
-  } catch (error) { console.error("MongoDB artifact persistence failed", error); return res.status(503).json({ service: "mongodb", status: "unavailable", error: "MongoDB artifact storage is unavailable" }); }
+  try { const result = await persistArtifact(req.body, req.user!.userId); return res.status(result.created ? 201 : 200).json(result); }
+  catch (error) { if (error instanceof ArtifactPersistenceError) return res.status(error.status).json({ error: error.message }); console.error("MongoDB artifact persistence failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(503).json({ service: "mongodb", status: "unavailable", error: "MongoDB artifact storage is unavailable" }); }
 });
 
 async function graphResponse(rootLabel: "Case" | "Evidence", req: any, res: any) {

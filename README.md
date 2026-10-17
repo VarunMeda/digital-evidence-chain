@@ -21,7 +21,7 @@ MySQL remains the source of truth for users, cases, evidence, custody, analysis,
 2. Apply the existing database bootstrap, then run `database/mysql/001_advanced_features.sql` once.
 3. Start the API: `cd backend; npm install; npm run dev`.
 4. From the repository root, start the dashboard: `cd ..\frontend; npm install; npm run dev`.
-5. From the repository root, run the Python tests: `cd ..\forensic-service; python -m unittest discover -s . -p 'test_*.py'`.
+5. From the repository root, install the extractor dependency and run the Python tests: `cd ..\forensic-service; .\.venv\Scripts\python.exe -m pip install -r requirements.txt; .\.venv\Scripts\python.exe -m unittest discover -s . -p 'test_*.py'`.
 
 For a local demonstration with dummy accounts, run `cd backend; npm run seed-demo` after the MySQL schema and migrations are ready. The command is idempotent and creates no real evidence: it adds two synthetic cases, two small text evidence files, two custodians, an investigator, an analyst, an administrator, custody history, analysis records, an open integrity alert, and audit entries. It never deletes or overwrites existing records. The command prints the demo passwords; do not use these accounts outside local development.
 
@@ -53,6 +53,7 @@ POST /api/evidence (multipart/form-data) case_id, evidence_name, evidence_type, 
 POST /api/evidence/:id/transfer       {"to_user_id":2,"reason":"Examination"}
 POST /api/evidence/:id/verify         recalculates stored bytes and preserves the original hash
 POST /api/analysis                    {"evidence_id":1,"analysis_type":"Timeline review"}
+POST /api/analysis/:id/run            runs safe metadata extraction and stores the result
 PATCH /api/cases/:id/status           {"status":"CLOSED"}
 ```
 
@@ -64,9 +65,9 @@ Neo4j uses exactly `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, and optional `NE
 
 After that health check succeeds, an administrator can run the idempotent MySQL-to-Neo4j projection with `npm run sync-neo4j` from `backend`, or `POST /api/integrations/neo4j/sync`. The sync creates scoped constraints and derives `Case`, `Evidence`, `Person`, `CustodyEvent`, and `Analysis` nodes with `HAS_EVIDENCE`, `CONCERNS`, `PERFORMED`, `COLLECTED`, `TRANSFERRED`, and `HAS_ANALYSIS` relationships. It reconciles only nodes marked `source_system=digital-evidence-chain:mysql`; it does not reset or delete unrelated graph data. Authenticated graph reads are available at `/api/integrations/graph/evidence/:id` and `/api/integrations/graph/case/:id` with bounded `depth` (1–2) and `limit` (1–200). The evidence detail page exposes the graph through its `Load graph` action. MongoDB artifacts remain a separate integration and are not copied into Neo4j in this milestone.
 
-Artifact documents contain `artifact_id`, `evidence_id`, `evidence_code`, `artifact_type`, `source_filename`, JSON `fields`, `parser.name`, `parser.version`, `observed_at`, `extraction_status`, a safe `error` when extraction fails, `provenance.source` (which must be `forensic-service`), `provenance.method`, `provenance.input_sha256`, `created_by`, `created_at`, and an `idempotency_key`. Supported types are `IMAGE_METADATA`, `VIDEO_METADATA`, `AUDIO_METADATA`, `DOCUMENT_METADATA`, `EXTRACTED_METADATA`, `PARSER_FINDING`, and `OBSERVATION`. Payloads reject credential-like fields, unsafe filenames, invalid hashes, unsupported types, malformed timestamps, failed records without errors, completed records with errors, and fields over 256 KB. The API verifies that the evidence exists in MySQL and that the provenance hash matches its immutable original SHA-256. MongoDB creates indexes for evidence/time lookup, type/status filters, and unique idempotency keys.
+Artifact documents contain `artifact_id`, `evidence_id`, `evidence_code`, `artifact_type`, `source_filename`, JSON `fields`, `parser.name`, `parser.version`, `observed_at`, `extraction_status`, a safe `error` when extraction fails, `provenance.source` (which must be `forensic-service`), `provenance.method`, `provenance.input_sha256`, `created_by`, `created_at`, and an `idempotency_key`. Supported types are `IMAGE_METADATA`, `VIDEO_METADATA`, `AUDIO_METADATA`, `DOCUMENT_METADATA`, `EXTRACTED_METADATA`, `PARSER_FINDING`, `OBSERVATION`, `METADATA_EXTRACTION`, and `STRUCTURAL_VALIDATION`. Payloads reject credential-like fields, unsafe filenames, invalid hashes, unsupported types, malformed timestamps, failed records without errors, completed records with errors, and fields over 256 KB. The API verifies that the evidence exists in MySQL and that the provenance hash matches its immutable original SHA-256. MongoDB creates indexes for evidence/time lookup, type/status filters, and unique idempotency keys.
 
-The current Python service only performs streaming SHA-256 hashing. It is not an extractor, so the dashboard artifact form is for validated extraction output and does not claim that a parser ran. A future extractor should submit only genuine output using the same provenance contract.
+The Python services preserve original bytes: `hash_file.py` performs streaming SHA-256 hashing, while `extract_metadata.py` performs bounded, read-only metadata and structural extraction for supported images, PDFs, text, JSON, XML, and DOCX files. Install the image parser dependency from `forensic-service/requirements.txt`; without Pillow, image extraction is unavailable. `POST /api/analysis/:id/run` re-verifies the stored hash before invoking the extractor and persists genuine output using the same provenance contract. Extraction limits are configurable with `MAX_ANALYSIS_BYTES`, `MAX_ANALYSIS_OUTPUT_BYTES`, `ANALYSIS_TIMEOUT_MS`, and `PYTHON_EXTRACTOR_PATH`.
 
 ## DBMS concepts demonstrated
 
