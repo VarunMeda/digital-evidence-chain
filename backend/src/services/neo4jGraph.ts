@@ -1,5 +1,6 @@
 import pool from "../db/mysql";
 import { withNeo4jSession } from "./neo4j";
+import type { Session } from "neo4j-driver";
 
 type Row = Record<string, any>;
 type GraphRecord = { graph_id: string; label: string; properties: Record<string, unknown> };
@@ -45,6 +46,7 @@ const constraints = [
 ];
 
 export type GraphSyncResult = { cases: number; evidence: number; people: number; custody_events: number; analyses: number; removed_nodes: number; completed_at: string };
+export class Neo4jGraphNotFoundError extends Error { constructor(public readonly graphId: string) { super("Graph root not found"); } }
 let lastSync: GraphSyncResult | null = null;
 
 export function getLastNeo4jSync(): GraphSyncResult | null { return lastSync; }
@@ -83,13 +85,18 @@ function safeLimit(value: unknown): number { const n = Number(value); return Num
 
 export async function readGraph(rootLabel: "Case" | "Evidence", rootId: number, depthValue: unknown, limitValue: unknown) {
   const depth = safeDepth(depthValue); const limit = safeLimit(limitValue);
-  return withNeo4jSession("READ", async (session) => {
-    const result = await session.run(`MATCH p=(root:${rootLabel} {graph_id:$rootId, source_system:$source})-[*1..${depth}]-(n) RETURN [node IN nodes(p) | {graph_id: node.graph_id, labels: labels(node), properties: properties(node)}] AS path_nodes, [rel IN relationships(p) | {type: type(rel), from: startNode(rel).graph_id, to: endNode(rel).graph_id, properties: properties(rel)}] AS path_relationships LIMIT $limit`, { rootId: `${rootLabel.toLowerCase()}:${rootId}`, source: SOURCE, limit });
+  return withNeo4jSession("READ", async (session) => readGraphWithSession(session, rootLabel, rootId, depth, limit));
+}
+
+export async function readGraphWithSession(session: Pick<Session, "run">, rootLabel: "Case" | "Evidence", rootId: number, depth: number, limit: number) {
+    const graphId = `${rootLabel.toLowerCase()}:${rootId}`;
+    const rootResult = await session.run(`MATCH (root:${rootLabel} {graph_id:$rootId, source_system:$source}) RETURN count(root) AS root_count`, { rootId: graphId, source: SOURCE });
+    if (rootResult.records[0]?.get("root_count") !== 1) throw new Neo4jGraphNotFoundError(graphId);
+    const result = await session.run(`MATCH p=(root:${rootLabel} {graph_id:$rootId, source_system:$source})-[*1..${depth}]-(n) RETURN [node IN nodes(p) | {graph_id: node.graph_id, labels: labels(node), properties: properties(node)}] AS path_nodes, [rel IN relationships(p) | {type: type(rel), from: startNode(rel).graph_id, to: endNode(rel).graph_id, properties: properties(rel)}] AS path_relationships LIMIT ${limit}`, { rootId: graphId, source: SOURCE });
     const nodes = new Map<string, any>(); const relationships = new Map<string, any>();
     for (const record of result.records) {
       for (const node of record.get("path_nodes") || []) nodes.set(node.graph_id, node);
       for (const rel of record.get("path_relationships") || []) relationships.set(`${rel.type}:${rel.from}:${rel.to}:${JSON.stringify(rel.properties || {})}`, rel);
     }
-    return { root: `${rootLabel.toLowerCase()}:${rootId}`, depth, limit, nodes: [...nodes.values()], relationships: [...relationships.values()], last_sync: lastSync };
-  });
+    return { root: graphId, depth, limit, nodes: [...nodes.values()], relationships: [...relationships.values()], last_sync: lastSync };
 }

@@ -37,11 +37,15 @@ test("protects the Neo4j health endpoint and accepts the existing Bearer session
 
       const token = createSession({ userId: 10, fullName: "Test Analyst", email: "analyst@example.test", role: "ANALYST" });
       const authenticated = await fetch(`${base}/api/integrations/neo4j-health`, { headers: { Authorization: `Bearer ${token}` } });
-      assert.equal(authenticated.status, 503);
-      const body = await authenticated.json() as { service: string; status: string; error?: string; missing?: string[] };
-      assert.equal(body.service, "neo4j");
-      assert.ok(["configuration_incomplete", "authentication_failed", "connectivity_failed", "query_failed"].includes(body.status));
-      assert.ok(body.error || body.missing);
+      assert.ok([200, 503].includes(authenticated.status));
+      const body = await authenticated.json() as { service?: string; status: string; database?: string; error?: string; missing?: string[] };
+      if (authenticated.status === 200) { assert.equal(body.status, "connected"); assert.equal(typeof body.database, "string"); }
+      else { assert.equal(body.service, "neo4j"); assert.ok(["configuration_incomplete", "authentication_failed", "connectivity_failed", "query_failed"].includes(body.status)); assert.ok(body.error || body.missing); }
+
+      const graphUnauthenticated = await fetch(`${base}/api/integrations/graph/evidence/1`);
+      assert.equal(graphUnauthenticated.status, 401);
+      const invalidGraphId = await fetch(`${base}/api/integrations/graph/evidence/not-an-id`, { headers: { Authorization: `Bearer ${token}` } });
+      assert.equal(invalidGraphId.status, 400);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

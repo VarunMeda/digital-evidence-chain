@@ -5,7 +5,7 @@ import pool from "../db/mysql";
 import { requireAuth, requireRoles } from "../middleware/auth";
 import { ARTIFACT_TYPES, EXTRACTION_STATUSES, validateArtifactInput } from "../services/artifactValidation";
 import { getNeo4jSettings, verifyNeo4jConnection } from "../services/neo4j";
-import { getLastNeo4jSync, readGraph, syncNeo4jGraph } from "../services/neo4jGraph";
+import { getLastNeo4jSync, Neo4jGraphNotFoundError, readGraph, syncNeo4jGraph } from "../services/neo4jGraph";
 
 const router = Router();
 router.use(requireAuth);
@@ -117,11 +117,17 @@ router.post("/artifacts", requireRoles("ANALYST", "ADMIN"), async (req, res) => 
 });
 
 async function graphResponse(rootLabel: "Case" | "Evidence", req: any, res: any) {
-  const configured = getNeo4jSettings(); const id = Number(req.params.id);
-  if (!configured.settings) return res.status(503).json({ service: "neo4j", status: "configuration_incomplete", missing: configured.missing });
+  const id = Number(req.params.id);
   if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: `Invalid ${rootLabel.toLowerCase()} ID` });
+  const configured = getNeo4jSettings();
+  if (!configured.settings) return res.status(503).json({ service: "neo4j", status: "configuration_incomplete", missing: configured.missing });
   try { return res.json(await readGraph(rootLabel, id, req.query.depth, req.query.limit)); }
-  catch (error) { console.error("Neo4j graph lookup failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(503).json({ service: "neo4j", status: "unavailable", error: "Neo4j authentication or read-only graph query failed" }); }
+  catch (error) {
+    if (error instanceof Neo4jGraphNotFoundError) return res.status(404).json({ service: "neo4j", status: "not_found", error: "Graph record not found" });
+    const failure = neo4jFailure(error);
+    console.error("Neo4j graph lookup failed", { name: error instanceof Error ? error.name : "UnknownError", status: failure.status });
+    return res.status(503).json({ service: "neo4j", ...failure });
+  }
 }
 
 router.get("/graph/evidence/:id", (req, res) => graphResponse("Evidence", req, res));
