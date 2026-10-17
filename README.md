@@ -25,6 +25,16 @@ MySQL remains the source of truth for users, cases, evidence, custody, analysis,
 
 If you are currently inside `backend`, use `cd ..\forensic-service` for the Python service—not `cd forensic-service`.
 
+To create the first administrator without committing a password, set temporary PowerShell variables and run `npm run bootstrap-admin` from `backend`:
+
+```powershell
+$env:BOOTSTRAP_ADMIN_EMAIL = "admin@example.test"
+$env:BOOTSTRAP_ADMIN_NAME = "System Administrator"
+$env:BOOTSTRAP_ADMIN_PASSWORD = "choose-a-long-local-password"
+npm run bootstrap-admin
+Remove-Item Env:BOOTSTRAP_ADMIN_EMAIL,Env:BOOTSTRAP_ADMIN_NAME,Env:BOOTSTRAP_ADMIN_PASSWORD
+```
+
 The first administrator must be bootstrapped out-of-band with a bcrypt/Argon2 hash; no production password is hardcoded. The current API exposes administrator-only user creation at `POST /api/users` after login.
 
 ## Core API examples

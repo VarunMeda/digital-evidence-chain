@@ -10,6 +10,7 @@ import evidenceRouter from "./routes/evidence";
 import analysisRouter from "./routes/analysis";
 import auditRouter from "./routes/audit";
 import integrationsRouter from "./routes/integrations";
+import operationsRouter from "./routes/operations";
 
 dotenv.config();
 
@@ -36,5 +37,6 @@ app.use("/api/evidence", evidenceRouter);
 app.use("/api/analysis", analysisRouter);
 app.use("/api/audit", auditRouter);
 app.use("/api/integrations", integrationsRouter);
+app.use("/api/operations", operationsRouter);
 
 if (process.env.NODE_ENV !== "test") app.listen(PORT, () => console.log(`Digital Evidence Chain API running at http://localhost:${PORT}`));
