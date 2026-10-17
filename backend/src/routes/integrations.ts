@@ -13,18 +13,25 @@ const mongoUri = process.env.MONGO_URI;
 const mongoDb = process.env.MONGO_DB || "digital_evidence_chain";
 const artifactCollection = "forensic_artifacts";
 
+function neo4jFailure(error: unknown): { status: "authentication_failed" | "connectivity_failed" | "query_failed"; error: string } {
+  const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code?: unknown }).code) : "";
+  if (code.startsWith("Neo.ClientError.Security") || /authentication|unauthorized|credentials/i.test(error instanceof Error ? error.message : "")) return { status: "authentication_failed", error: "Neo4j rejected the configured credentials" };
+  if (/ServiceUnavailable|SessionExpired|Network|Connection|ECONNREFUSED|connectivity/i.test(code) || /ServiceUnavailable|SessionExpired|ECONNREFUSED|connectivity|connection/i.test(error instanceof Error ? error.message : "")) return { status: "connectivity_failed", error: "Neo4j could not be reached at the configured URI" };
+  return { status: "query_failed", error: "Neo4j health query failed" };
+}
+
 router.get("/neo4j-health", async (_req, res) => {
   const configured = getNeo4jSettings();
   if (!configured.settings) return res.status(503).json({ service: "neo4j", status: "configuration_incomplete", missing: configured.missing });
   try { return res.json(await verifyNeo4jConnection()); }
-  catch (error) { console.error("Neo4j health check failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(503).json({ service: "neo4j", status: "unavailable", error: "Neo4j authentication or read-only health query failed" }); }
+  catch (error) { const failure = neo4jFailure(error); console.error("Neo4j health check failed", { name: error instanceof Error ? error.name : "UnknownError", status: failure.status }); return res.status(503).json({ service: "neo4j", ...failure }); }
 });
 
 router.get("/neo4j-status", async (_req, res) => {
   const configured = getNeo4jSettings();
   if (!configured.settings) return res.status(503).json({ service: "neo4j", status: "configuration_incomplete", missing: configured.missing, last_sync: getLastNeo4jSync() });
   try { return res.json({ ...(await verifyNeo4jConnection()), last_sync: getLastNeo4jSync() }); }
-  catch (error) { console.error("Neo4j status check failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(503).json({ service: "neo4j", status: "unavailable", error: "Neo4j authentication or read-only health query failed", last_sync: getLastNeo4jSync() }); }
+  catch (error) { const failure = neo4jFailure(error); console.error("Neo4j status check failed", { name: error instanceof Error ? error.name : "UnknownError", status: failure.status }); return res.status(503).json({ service: "neo4j", ...failure, last_sync: getLastNeo4jSync() }); }
 });
 
 router.post("/neo4j/sync", requireRoles("ADMIN"), async (_req, res) => {
