@@ -58,6 +58,8 @@ PATCH /api/cases/:id/status           {"status":"CLOSED"}
 
 The migration adds `v_case_summary`, `v_custody_history`, immutable audit triggers, indexes, `sp_transfer_custody`, and `sp_close_case`. Custody uses `SELECT ... FOR UPDATE`; the API also locks the evidence row and rejects stale custodians. Case closure requires no pending/in-progress analysis and no unresolved integrity alerts.
 
+Evidence registration supports PDF, DOC, DOCX, TXT, JPG/JPEG, PNG, TIFF, BMP, MP4, MOV, AVI, MKV, MP3, WAV, E01, raw disk-image extensions (`.dd`, `.img`, `.raw`, `.dmg`), and text artifacts such as LOG, CSV, JSON, and XML. The server checks file signatures for formats with recognizable magic bytes; raw disk images have no universal magic and therefore use an explicit extension plus the configured size limit. `MAX_UPLOAD_BYTES` defaults to 512 MiB and can be lowered or raised in `backend/.env`. Files are streamed by the Python hashing worker and are never decoded, re-encoded, or executed.
+
 ## Verification performed
 
 - `backend`: `npm run build` passes.
