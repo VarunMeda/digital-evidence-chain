@@ -1,0 +1,55 @@
+# Digital Evidence Chain Management System
+
+An incremental college DBMS project for recording investigations, evidence registration, custody, forensic analysis, integrity verification, and audit history.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  UI[Next.js dashboard] --> API[Express TypeScript API]
+  API --> SQL[(MySQL authoritative metadata)]
+  API --> HASH[Python SHA-256 worker]
+  API -. optional .-> M[(MongoDB forensic artifacts)]
+  API -. optional .-> N[(Neo4j investigation graph)]
+```
+
+MySQL remains the source of truth for users, cases, evidence, custody, analysis, integrity alerts, and audit records. Files are stored under the configured evidence root with generated names. The original SHA-256 is immutable in the evidence row. MongoDB and Neo4j are optional integrations and report `503` when not configured or unavailable; their writes are intentionally not claimed to be atomic with MySQL.
+
+## Run on Windows PowerShell
+
+1. Copy `backend/.env.example` to `backend/.env` and fill in local values. Never commit `.env`.
+2. Apply the existing database bootstrap, then run `database/mysql/001_advanced_features.sql` once.
+3. Start the API: `cd backend; npm install; npm run dev`.
+4. Start the dashboard: `cd frontend; npm install; npm run dev`.
+5. Run the Python tests: `cd forensic-service; python -m unittest discover -s . -p 'test_*.py'`.
+
+The first administrator must be bootstrapped out-of-band with a bcrypt/Argon2 hash; no production password is hardcoded. The current API exposes administrator-only user creation at `POST /api/users` after login.
+
+## Core API examples
+
+```text
+POST /api/auth/login                  {"email":"admin@example.test","password":"..."}
+GET  /api/cases                       Authorization: Bearer <token>
+POST /api/cases                       {"case_number":"DEC-2026-002","title":"Demo case"}
+POST /api/evidence (multipart/form-data) case_id, evidence_name, evidence_type, evidence file
+POST /api/evidence/:id/transfer       {"to_user_id":2,"reason":"Examination"}
+POST /api/evidence/:id/verify         recalculates stored bytes and preserves the original hash
+POST /api/analysis                    {"evidence_id":1,"analysis_type":"Timeline review"}
+PATCH /api/cases/:id/status           {"status":"CLOSED"}
+```
+
+## DBMS concepts demonstrated
+
+The migration adds `v_case_summary`, `v_custody_history`, immutable audit triggers, indexes, `sp_transfer_custody`, and `sp_close_case`. Custody uses `SELECT ... FOR UPDATE`; the API also locks the evidence row and rejects stale custodians. Case closure requires no pending/in-progress analysis and no unresolved integrity alerts.
+
+## Verification performed
+
+- `backend`: `npm run build` passes.
+- `forensic-service`: 2 Python unit tests pass, including a known SHA-256 vector and path escape rejection.
+- `frontend`: `npm run build` passes when run with normal Windows process permissions.
+- MySQL: migration applied successfully; both views, both procedures, and both audit triggers verified; `v_case_summary` queried successfully.
+- MongoDB/Neo4j: integration code and parameterized queries are present, but availability depends on local services and credentials.
+
+## Limitations
+
+Sessions are in-memory for this college demonstration and are lost when the API restarts; use a shared session store for production. Filesystem storage and MySQL cannot form one normal atomic transaction, so registration uses compensation cleanup on failure. A hash mismatch records a discrepancy and does not attribute misconduct.
