@@ -60,7 +60,7 @@ The migration adds `v_case_summary`, `v_custody_history`, immutable audit trigge
 - `forensic-service`: 2 Python unit tests pass, including a known SHA-256 vector and path escape rejection.
 - `frontend`: `npm run build` passes when run with normal Windows process permissions.
 - MySQL: migration applied successfully; both views, both procedures, and both audit triggers verified; `v_case_summary` queried successfully.
-- MongoDB/Neo4j: integration code and parameterized queries are present, but availability depends on local services and credentials.
+- MongoDB/Neo4j: integration code and parameterized queries are present, but availability depends on local services and credentials. The dashboard includes sign-in, overview metrics, case list/details/creation, evidence listing/registration, custody, alerts, analysis, and audit views.
 
 ## Limitations
 
