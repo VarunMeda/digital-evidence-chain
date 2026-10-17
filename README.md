@@ -27,7 +27,7 @@ If you are currently inside `backend`, use `cd ..\forensic-service` for the Pyth
 
 ## Cloud deployment configuration
 
-The frontend environment is evaluated when Next.js is built. For a separate cloud frontend and backend, set `NEXT_PUBLIC_API_URL` in the frontend deployment to the backend's public HTTPS API URL, such as `https://api.example.com/api`, then redeploy the frontend. Set `FRONTEND_ORIGIN` in the backend deployment to the exact frontend origin, such as `https://app.example.com`, and restart the backend. Do not use `localhost` in cloud environment variables. If both services are served behind the same domain and `/api` is reverse-proxied to Express, the frontend can use its same-origin `/api` fallback.
+The frontend environment is evaluated when Next.js is built. For a separate cloud frontend and backend, set `NEXT_PUBLIC_API_URL` in the frontend deployment to the backend's public HTTPS URL, such as `https://api.example.com` or `https://api.example.com/api`, then redeploy the frontend. The client normalizes either form to the `/api` base. Set `FRONTEND_ORIGIN` in the backend deployment to the exact frontend origin, such as `https://app.example.com`, and restart the backend. Do not use `localhost` in cloud environment variables. If both services are served behind the same domain and `/api` is reverse-proxied to Express, the frontend can use its same-origin `/api` fallback.
 
 To create the first administrator without committing a password, set temporary PowerShell variables and run `npm run bootstrap-admin` from `backend`:
 

@@ -2,7 +2,8 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
-const API = process.env.NEXT_PUBLIC_API_URL || (typeof window !== "undefined" && !["localhost", "127.0.0.1"].includes(window.location.hostname) ? `${window.location.origin}/api` : "http://localhost:4000/api");
+const configuredApi = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "");
+const API = configuredApi ? (configuredApi.endsWith("/api") ? configuredApi : `${configuredApi}/api`) : (typeof window !== "undefined" && !["localhost", "127.0.0.1"].includes(window.location.hostname) ? `${window.location.origin}/api` : "http://localhost:4000/api");
 type User = { user_id: number; full_name: string; email: string; role: string };
 type Case = { case_id: number; case_number: string; title: string; description?: string; status: string; created_at?: string; evidence?: Evidence[]; analysis?: Analysis[]; integrity_alerts?: Alert[] };
 type Evidence = { evidence_id: number; evidence_code: string; case_id: number; evidence_name: string; evidence_type: string; original_filename?: string; file_size_bytes?: number; original_sha256?: string; status: string };
