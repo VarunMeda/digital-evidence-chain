@@ -1,7 +1,11 @@
 USE digital_evidence_chain;
 
 -- Additive indexes for the application's real list and history queries.
-CREATE INDEX idx_evidence_case_status ON evidence (case_id, status, registered_at);
+SET @idx_exists := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'evidence' AND index_name = 'idx_evidence_case_status');
+SET @idx_sql := IF(@idx_exists = 0, 'CREATE INDEX idx_evidence_case_status ON evidence (case_id, status, registered_at)', 'SELECT 1');
+PREPARE idx_stmt FROM @idx_sql;
+EXECUTE idx_stmt;
+DEALLOCATE PREPARE idx_stmt;
 
 CREATE OR REPLACE VIEW v_case_summary AS
 SELECT c.case_id, c.case_number, c.title, c.status, c.created_at, c.closed_at,
