@@ -6,7 +6,7 @@ const configuredApi = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "");
 const API = configuredApi ? (configuredApi.endsWith("/api") ? configuredApi : `${configuredApi}/api`) : (typeof window !== "undefined" && !["localhost", "127.0.0.1"].includes(window.location.hostname) ? `${window.location.origin}/api` : "http://localhost:4000/api");
 type User = { user_id: number; full_name: string; email: string; role: string };
 type Case = { case_id: number; case_number: string; title: string; description?: string; status: string; created_at?: string; evidence?: Evidence[]; analysis?: Analysis[]; integrity_alerts?: Alert[] };
-type Evidence = { evidence_id: number; evidence_code: string; case_id: number; evidence_name: string; evidence_type: string; original_filename?: string; file_size_bytes?: number; original_sha256?: string; status: string };
+type Evidence = { evidence_id: number; evidence_code: string; case_id: number; evidence_name: string; evidence_type: string; original_filename?: string; file_size_bytes?: number; original_sha256?: string; current_custodian?: number | null; status: string };
 type Analysis = { analysis_id: number; evidence_id: number; analysis_type: string; status: string; result_summary?: string };
 type Alert = { alert_id: number; evidence_id: number; evidence_code?: string; evidence_name?: string; expected_sha256: string; actual_sha256: string; status: string; severity: string; resolution_notes?: string };
 type Summary = { active_cases: number; total_cases: number; evidence_items: number; open_alerts: number };
@@ -46,7 +46,7 @@ function Shell({ user, view, setView, logout, children }: { user: User; view: Vi
 }
 
 function ViewContent({ view, setView }: { view: View; setView: (view: View) => void }) {
-  if (view === "overview") return <Overview setView={setView} />; if (view === "cases") return <Cases />; if (view === "evidence") return <EvidenceView />; if (view === "custody") return <TableView title="Custody history" endpoint="/operations/custody" columns={["evidence_code", "event_type", "from_user_name", "to_user_name", "performed_by_name", "reason", "event_time"]} />; if (view === "alerts") return <Alerts />; if (view === "analysis") return <TableView title="Analysis records" endpoint="/analysis" columns={["analysis_id", "evidence_id", "analysis_type", "status", "result_summary", "created_at"]} />; return <TableView title="Audit trail" endpoint="/audit" columns={["log_id", "action", "entity_type", "entity_id", "created_at", "details"]} />;
+  if (view === "overview") return <Overview setView={setView} />; if (view === "cases") return <CasesWithEvidence />; if (view === "evidence") return <EvidenceView />; if (view === "custody") return <TableView title="Custody history" endpoint="/operations/custody" columns={["evidence_code", "event_type", "from_user_name", "to_user_name", "performed_by_name", "reason", "event_time"]} />; if (view === "alerts") return <Alerts />; if (view === "analysis") return <TableView title="Analysis records" endpoint="/analysis" columns={["analysis_id", "evidence_id", "analysis_type", "status", "result_summary", "created_at"]} />; return <TableView title="Audit trail" endpoint="/audit" columns={["log_id", "action", "entity_type", "entity_id", "created_at", "details"]} />;
 }
 
 function Overview({ setView }: { setView: (view: View) => void }) {
@@ -56,6 +56,17 @@ function Overview({ setView }: { setView: (view: View) => void }) {
 }
 
 function Metric({ label, value, tone, onClick }: { label: string; value: string; tone: string; onClick: () => void }) { return <button className={`metric ${tone}`} onClick={onClick}><span>{label}</span><strong>{value}</strong><small>Live register</small></button>; }
+
+function CasesWithEvidence() {
+  const [cases, setCases] = useState<Case[]>([]); const [selected, setSelected] = useState<Case | null>(null); const [showForm, setShowForm] = useState(false); const [loading, setLoading] = useState(false); const [error, setError] = useState("");
+  const load = () => { request<Case[]>("/cases").then(setCases).catch((e) => setError((e as Error).message)); };
+  useEffect(() => { load(); }, []);
+  async function openCase(caseId: number) { setError(""); setLoading(true); try { setSelected(await request<Case>(`/cases/${caseId}`)); } catch (e) { setError((e as Error).message); } finally { setLoading(false); } }
+  if (selected) return <><div className="panel detail"><button className="back" onClick={() => setSelected(null)}>â† Back to cases</button><p className="eyebrow">CASE DETAILS</p><h2>{selected.case_number} Â· {selected.title}</h2><p className="muted">{selected.description || "No description"}</p><p>Status: <b>{selected.status.replaceAll("_", " ")}</b></p></div><div className="panel table case-evidence"><div className="panel-head"><div><p className="eyebrow">EVIDENCE REGISTER</p><h2>Evidence for this case</h2></div><span className="muted">{selected.evidence?.length || 0} item(s)</span></div>{selected.evidence?.length ? selected.evidence.map((item) => <div className="row" key={item.evidence_id}><div><strong>{item.evidence_code} Â· {item.evidence_name}</strong><span>{item.evidence_type} Â· {item.original_filename || "file"} Â· {formatBytes(item.file_size_bytes)}</span><span className="hash">SHA-256: {item.original_sha256 || "Not available"}</span></div><span className={`pill ${item.status.toLowerCase()}`}>{item.status.replaceAll("_", " ")}</span><span className="muted">Custodian: {item.current_custodian ?? "Storage"}</span></div>) : <div className="empty">No evidence has been registered for this case.</div>}</div></>;
+  return <><div className="toolbar"><p className="muted">{cases.length} case record(s)</p><button className="primary" onClick={() => setShowForm(true)}>+ New case</button></div>{error && <div className="error notice">{error}</div>}{showForm && <CaseForm onClose={() => setShowForm(false)} onCreated={() => { setShowForm(false); load(); }} />}{loading && <div className="notice">Loading case detailsâ€¦</div>}<div className="panel table">{cases.map((item) => <button className="row row-button" key={item.case_id} onClick={() => openCase(item.case_id)}><div><strong>{item.case_number}</strong><span>{item.title}</span></div><span className={`pill ${item.status.toLowerCase()}`}>{item.status.replaceAll("_", " ")}</span><span className="arrow">â†’</span></button>)}{!cases.length && !error && <div className="empty">No cases found.</div>}</div></>;
+}
+
+function formatBytes(bytes?: number) { if (bytes === undefined || bytes === null) return "Size unavailable"; if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / (1024 * 1024)).toFixed(1)} MB`; }
 
 function Cases() {
   const [cases, setCases] = useState<Case[]>([]); const [selected, setSelected] = useState<Case | null>(null); const [showForm, setShowForm] = useState(false); const [error, setError] = useState(""); const load = () => { request<Case[]>("/cases").then(setCases).catch((e) => setError((e as Error).message)); }; useEffect(() => { load(); }, []);
