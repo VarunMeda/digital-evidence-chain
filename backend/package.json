@@ -6,6 +6,7 @@
   "scripts": {
     "test": "tsx --test tests/evidenceValidation.test.ts tests/lifecycle.integration.test.ts",
     "bootstrap-admin": "tsx scripts/bootstrap-admin.ts",
+    "seed-demo": "tsx scripts/seed-demo.ts",
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js"

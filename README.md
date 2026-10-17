@@ -23,6 +23,8 @@ MySQL remains the source of truth for users, cases, evidence, custody, analysis,
 4. From the repository root, start the dashboard: `cd ..\frontend; npm install; npm run dev`.
 5. From the repository root, run the Python tests: `cd ..\forensic-service; python -m unittest discover -s . -p 'test_*.py'`.
 
+For a local demonstration with dummy accounts, run `cd backend; npm run seed-demo` after the MySQL schema and migrations are ready. The command is idempotent and creates no real evidence: it adds two synthetic cases, two small text evidence files, two custodians, an investigator, an analyst, an administrator, custody history, analysis records, an open integrity alert, and audit entries. It never deletes or overwrites existing records. The command prints the demo passwords; do not use these accounts outside local development.
+
 If you are currently inside `backend`, use `cd ..\forensic-service` for the Python service—not `cd forensic-service`.
 
 ## Cloud deployment configuration
