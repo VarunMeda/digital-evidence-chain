@@ -56,6 +56,14 @@ POST /api/analysis                    {"evidence_id":1,"analysis_type":"Timeline
 PATCH /api/cases/:id/status           {"status":"CLOSED"}
 ```
 
+## MongoDB forensic artifacts
+
+MongoDB is optional for the core MySQL workflow. Configure `MONGO_URI` and `MONGO_DB` in the ignored `backend/.env`; the API returns a safe `503` status when MongoDB is unavailable. Artifact routes are authenticated: `GET /api/integrations/artifacts?evidence_id=1&page=1&page_size=25`, `GET /api/integrations/artifacts/:artifact_id`, and `POST /api/integrations/artifacts` for `ANALYST` or `ADMIN` users.
+
+Artifact documents contain `artifact_id`, `evidence_id`, `evidence_code`, `artifact_type`, `source_filename`, JSON `fields`, `parser.name`, `parser.version`, `observed_at`, `extraction_status`, a safe `error` when extraction fails, `provenance.source` (which must be `forensic-service`), `provenance.method`, `provenance.input_sha256`, `created_by`, `created_at`, and an `idempotency_key`. Supported types are `IMAGE_METADATA`, `VIDEO_METADATA`, `AUDIO_METADATA`, `DOCUMENT_METADATA`, `EXTRACTED_METADATA`, `PARSER_FINDING`, and `OBSERVATION`. Payloads reject credential-like fields, unsafe filenames, invalid hashes, unsupported types, malformed timestamps, failed records without errors, completed records with errors, and fields over 256 KB. The API verifies that the evidence exists in MySQL and that the provenance hash matches its immutable original SHA-256. MongoDB creates indexes for evidence/time lookup, type/status filters, and unique idempotency keys.
+
+The current Python service only performs streaming SHA-256 hashing. It is not an extractor, so the dashboard artifact form is for validated extraction output and does not claim that a parser ran. A future extractor should submit only genuine output using the same provenance contract.
+
 ## DBMS concepts demonstrated
 
 The migration adds `v_case_summary`, `v_custody_history`, immutable audit triggers, indexes, `sp_transfer_custody`, and `sp_close_case`. Custody uses `SELECT ... FOR UPDATE`; the API also locks the evidence row and rejects stale custodians. Case closure requires no pending/in-progress analysis and no unresolved integrity alerts.

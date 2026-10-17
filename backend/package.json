@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "tsx --test tests/evidenceValidation.test.ts tests/lifecycle.integration.test.ts",
+    "test": "tsx --test tests/evidenceValidation.test.ts tests/artifactValidation.test.ts tests/lifecycle.integration.test.ts",
     "bootstrap-admin": "tsx scripts/bootstrap-admin.ts",
     "seed-demo": "tsx scripts/seed-demo.ts",
     "dev": "tsx watch src/server.ts",
