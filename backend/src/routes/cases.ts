@@ -1,113 +1,24 @@
 import { Router } from "express";
 import pool from "../db/mysql";
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
-
+import { requireAuth, requireRoles } from "../middleware/auth";
+import { writeAudit } from "../services/audit";
 const router = Router();
-
-interface CaseRow extends RowDataPacket {
-  case_id: number;
-  case_number: string;
-  title: string;
-  description: string | null;
-  created_by: number;
-  status: string;
-  created_at: Date;
-}
-
-// Create a case
-router.post("/", async (req, res) => {
-  const { case_number, title, description, created_by } = req.body ?? {};
-
-  if (
-    typeof case_number !== "string" ||
-    !case_number.trim() ||
-    typeof title !== "string" ||
-    !title.trim() ||
-    !Number.isInteger(created_by) ||
-    created_by <= 0
-  ) {
-    return res.status(400).json({
-      error: "case_number, title, and a valid created_by user ID are required"
-    });
-  }
-
-  try {
-    const [result] = await pool.execute<ResultSetHeader>(
-      `INSERT INTO cases (case_number, title, description, created_by)
-       VALUES (?, ?, ?, ?)`,
-      [
-        case_number.trim(),
-        title.trim(),
-        typeof description === "string" ? description.trim() || null : null,
-        created_by
-      ]
-    );
-
-    return res.status(201).json({
-      message: "Case created successfully",
-      case_id: result.insertId,
-      case_number: case_number.trim()
-    });
-  } catch (error: unknown) {
-    const mysqlError = error as { code?: string };
-
-    if (mysqlError.code === "ER_DUP_ENTRY") {
-      return res.status(409).json({
-        error: "A case with this case number already exists"
-      });
-    }
-
-    console.error("Case creation failed:", error);
-
-    return res.status(500).json({
-      error: "Failed to create case"
-    });
-  }
+router.use(requireAuth);
+interface CaseRow extends RowDataPacket { case_id: number; case_number: string; title: string; description: string | null; created_by: number; status: string; created_at: Date; closed_at: Date | null; }
+router.post("/", requireRoles("INVESTIGATOR", "ADMIN"), async (req, res) => {
+  const { case_number, title, description } = req.body ?? {};
+  if (typeof case_number !== "string" || !/^[A-Z0-9-]{4,50}$/i.test(case_number.trim()) || typeof title !== "string" || title.trim().length < 3) return res.status(400).json({ error: "A valid case number and title are required" });
+  try { const [result] = await pool.execute<ResultSetHeader>("INSERT INTO cases (case_number, title, description, created_by) VALUES (?, ?, ?, ?)", [case_number.trim(), title.trim(), typeof description === "string" ? description.trim() || null : null, req.user!.userId]); await writeAudit(req.user!.userId, "CASE_CREATED", "CASE", result.insertId, { case_number: case_number.trim() }); return res.status(201).json({ case_id: result.insertId, case_number: case_number.trim(), status: "OPEN" }); }
+  catch (error: any) { if (error.code === "ER_DUP_ENTRY") return res.status(409).json({ error: "A case with this case number already exists" }); console.error(error); return res.status(500).json({ error: "Failed to create case" }); }
 });
-
-// List cases
-router.get("/", async (_req, res) => {
-  try {
-    const [rows] = await pool.query<CaseRow[]>(
-      `SELECT case_id, case_number, title, description,
-              created_by, status, created_at
-       FROM cases
-       ORDER BY created_at DESC`
-    );
-
-    return res.json(rows);
-  } catch (error) {
-    console.error("Failed to retrieve cases:", error);
-    return res.status(500).json({ error: "Failed to retrieve cases" });
-  }
-});
-
-// Retrieve one case
+router.get("/", async (_req, res) => { try { const [rows] = await pool.query<CaseRow[]>("SELECT case_id, case_number, title, description, created_by, status, created_at, closed_at FROM cases ORDER BY created_at DESC"); return res.json(rows); } catch (error) { console.error(error); return res.status(500).json({ error: "Failed to retrieve cases" }); } });
 router.get("/:id", async (req, res) => {
-  const id = Number(req.params.id);
-
-  if (!Number.isSafeInteger(id) || id <= 0) {
-    return res.status(400).json({ error: "Invalid case ID" });
-  }
-
-  try {
-    const [rows] = await pool.execute<CaseRow[]>(
-      `SELECT case_id, case_number, title, description,
-              created_by, status, created_at
-       FROM cases
-       WHERE case_id = ?`,
-      [id]
-    );
-
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Case not found" });
-    }
-
-    return res.json(rows[0]);
-  } catch (error) {
-    console.error("Failed to retrieve case:", error);
-    return res.status(500).json({ error: "Failed to retrieve case" });
-  }
+  const id = Number(req.params.id); if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid case ID" });
+  try { const [cases] = await pool.execute<CaseRow[]>("SELECT case_id, case_number, title, description, created_by, status, created_at, closed_at FROM cases WHERE case_id = ?", [id]); if (!cases.length) return res.status(404).json({ error: "Case not found" }); const [evidence] = await pool.execute("SELECT evidence_id, evidence_code, evidence_name, evidence_type, original_filename, file_size_bytes, original_sha256, current_custodian, status, registered_at FROM evidence WHERE case_id = ? ORDER BY registered_at DESC", [id]); const [analysis] = await pool.execute("SELECT a.* FROM analysis_records a JOIN evidence e ON e.evidence_id = a.evidence_id WHERE e.case_id = ? ORDER BY a.created_at DESC", [id]); const [alerts] = await pool.execute("SELECT i.* FROM integrity_alerts i JOIN evidence e ON e.evidence_id = i.evidence_id WHERE e.case_id = ? ORDER BY i.detected_at DESC", [id]); return res.json({ ...cases[0], evidence, analysis, integrity_alerts: alerts }); } catch (error) { console.error(error); return res.status(500).json({ error: "Failed to retrieve case" }); }
 });
-
+router.patch("/:id/status", requireRoles("INVESTIGATOR", "ADMIN"), async (req, res) => {
+  const id = Number(req.params.id); const status = req.body?.status; if (!Number.isSafeInteger(id) || !["OPEN", "UNDER_INVESTIGATION", "CLOSED"].includes(status)) return res.status(400).json({ error: "Invalid case or status" }); const connection = await pool.getConnection();
+  try { await connection.beginTransaction(); const [rows] = await connection.execute<any[]>("SELECT status FROM cases WHERE case_id = ? FOR UPDATE", [id]); if (!rows.length) { await connection.rollback(); return res.status(404).json({ error: "Case not found" }); } if (status === "CLOSED") { const [pending] = await connection.execute<any[]>("SELECT COUNT(*) AS count FROM analysis_records a JOIN evidence e ON e.evidence_id=a.evidence_id WHERE e.case_id=? AND a.status IN ('PENDING','IN_PROGRESS')", [id]); const [alerts] = await connection.execute<any[]>("SELECT COUNT(*) AS count FROM integrity_alerts i JOIN evidence e ON e.evidence_id=i.evidence_id WHERE e.case_id=? AND i.status <> 'RESOLVED'", [id]); if (Number(pending[0].count) || Number(alerts[0].count)) { await connection.rollback(); return res.status(409).json({ error: "Case cannot close while analysis is pending or integrity alerts are unresolved" }); } } await connection.execute("UPDATE cases SET status = ?, closed_at = CASE WHEN ? = 'CLOSED' THEN CURRENT_TIMESTAMP ELSE NULL END WHERE case_id = ?", [status, status, id]); await connection.commit(); await writeAudit(req.user!.userId, "CASE_STATUS_CHANGED", "CASE", id, { status }); return res.json({ case_id: id, status }); } catch (error) { await connection.rollback(); console.error(error); return res.status(500).json({ error: "Failed to update case status" }); } finally { connection.release(); }
+});
 export default router;

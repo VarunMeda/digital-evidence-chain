@@ -4,13 +4,19 @@ import dotenv from "dotenv";
 import healthRouter from "./routes/health";
 import dbHealthRouter from "./routes/dbHealth";
 import casesRouter from "./routes/cases";
+import authRouter from "./routes/auth";
+import usersRouter from "./routes/users";
+import evidenceRouter from "./routes/evidence";
+import analysisRouter from "./routes/analysis";
+import auditRouter from "./routes/audit";
+import integrationsRouter from "./routes/integrations";
 
 dotenv.config();
 
-const app = express();
+export const app = express();
 const PORT = Number(process.env.PORT) || 4000;
 
-app.use(cors());
+app.use(cors({ origin: process.env.FRONTEND_ORIGIN || "http://localhost:3000" }));
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/", (_req, res) => {
@@ -22,9 +28,13 @@ app.get("/", (_req, res) => {
 
 app.use("/api/health", healthRouter);
 app.use("/api/db-health", dbHealthRouter);
+app.use("/api/auth", authRouter);
+app.use("/api/users", usersRouter);
 
 app.use("/api/cases", casesRouter);
+app.use("/api/evidence", evidenceRouter);
+app.use("/api/analysis", analysisRouter);
+app.use("/api/audit", auditRouter);
+app.use("/api/integrations", integrationsRouter);
 
-app.listen(PORT, () => {
-  console.log(`Digital Evidence Chain API running at http://localhost:${PORT}`);
-});
+if (process.env.NODE_ENV !== "test") app.listen(PORT, () => console.log(`Digital Evidence Chain API running at http://localhost:${PORT}`));
