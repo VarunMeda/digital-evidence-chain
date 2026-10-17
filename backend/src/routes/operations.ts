@@ -28,10 +28,19 @@ router.get("/alerts", async (_req, res) => {
 router.patch("/alerts/:id", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
   const id = Number(req.params.id); const status = req.body?.status; const notes = typeof req.body?.resolution_notes === "string" ? req.body.resolution_notes.trim() : null;
   if (!Number.isSafeInteger(id) || !["OPEN", "INVESTIGATING", "RESOLVED"].includes(status)) return res.status(400).json({ error: "Invalid alert or status" });
-  const [result] = await pool.execute<any>("UPDATE integrity_alerts SET status=?, resolution_notes=? WHERE alert_id=?", [status, notes, id]);
-  if (!result.affectedRows) return res.status(404).json({ error: "Alert not found" });
-  await writeAudit(req.user!.userId, "INTEGRITY_ALERT_UPDATED", "INTEGRITY_ALERT", id, { status });
-  return res.json({ alert_id: id, status });
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [result] = await connection.execute<any>("UPDATE integrity_alerts SET status=?, resolution_notes=? WHERE alert_id=?", [status, notes, id]);
+    if (!result.affectedRows) { await connection.rollback(); return res.status(404).json({ error: "Alert not found" }); }
+    await writeAudit(req.user!.userId, "INTEGRITY_ALERT_UPDATED", "INTEGRITY_ALERT", id, { status }, connection);
+    await connection.commit();
+    return res.json({ alert_id: id, status });
+  } catch (error) {
+    await connection.rollback().catch((rollbackError) => console.error("Alert update rollback failed", rollbackError));
+    console.error(error);
+    return res.status(500).json({ error: "Failed to update integrity alert" });
+  } finally { connection.release(); }
 });
 
 export default router;
