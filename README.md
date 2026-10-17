@@ -20,8 +20,10 @@ MySQL remains the source of truth for users, cases, evidence, custody, analysis,
 1. Copy `backend/.env.example` to `backend/.env` and fill in local values. Never commit `.env`.
 2. Apply the existing database bootstrap, then run `database/mysql/001_advanced_features.sql` once.
 3. Start the API: `cd backend; npm install; npm run dev`.
-4. Start the dashboard: `cd frontend; npm install; npm run dev`.
-5. Run the Python tests: `cd forensic-service; python -m unittest discover -s . -p 'test_*.py'`.
+4. From the repository root, start the dashboard: `cd ..\frontend; npm install; npm run dev`.
+5. From the repository root, run the Python tests: `cd ..\forensic-service; python -m unittest discover -s . -p 'test_*.py'`.
+
+If you are currently inside `backend`, use `cd ..\forensic-service` for the Python service—not `cd forensic-service`.
 
 The first administrator must be bootstrapped out-of-band with a bcrypt/Argon2 hash; no production password is hardcoded. The current API exposes administrator-only user creation at `POST /api/users` after login.
 

@@ -2,6 +2,8 @@
 
 The browser calls the Express API. Express authenticates the principal, authorizes roles, validates inputs, and writes MySQL transactions. Evidence bytes are staged in a generated storage name, then hashed by `forensic-service/hash_file.py` in chunks. A failed registration rolls back MySQL and removes the staged file.
 
+On Windows PowerShell, `backend`, `frontend`, and `forensic-service` are sibling directories. From `backend`, reach the Python service with `cd ..\forensic-service`.
+
 ## Demonstration script
 
 1. Log in as a bootstrapped administrator and create an investigator, analyst, and custodian.
