@@ -1,11 +1,11 @@
 import { Router } from "express";
 import { MongoClient } from "mongodb";
-import neo4j from "neo4j-driver";
 import crypto from "node:crypto";
 import pool from "../db/mysql";
 import { requireAuth, requireRoles } from "../middleware/auth";
 import { ARTIFACT_TYPES, EXTRACTION_STATUSES, validateArtifactInput } from "../services/artifactValidation";
 import { getNeo4jSettings, verifyNeo4jConnection } from "../services/neo4j";
+import { getLastNeo4jSync, readGraph, syncNeo4jGraph } from "../services/neo4jGraph";
 
 const router = Router();
 router.use(requireAuth);
@@ -18,6 +18,18 @@ router.get("/neo4j-health", async (_req, res) => {
   if (!configured.settings) return res.status(503).json({ service: "neo4j", status: "configuration_incomplete", missing: configured.missing });
   try { return res.json(await verifyNeo4jConnection()); }
   catch (error) { console.error("Neo4j health check failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(503).json({ service: "neo4j", status: "unavailable", error: "Neo4j authentication or read-only health query failed" }); }
+});
+
+router.get("/neo4j-status", async (_req, res) => {
+  const configured = getNeo4jSettings();
+  if (!configured.settings) return res.status(503).json({ service: "neo4j", status: "configuration_incomplete", missing: configured.missing, last_sync: getLastNeo4jSync() });
+  try { return res.json({ ...(await verifyNeo4jConnection()), last_sync: getLastNeo4jSync() }); }
+  catch (error) { console.error("Neo4j status check failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(503).json({ service: "neo4j", status: "unavailable", error: "Neo4j authentication or read-only health query failed", last_sync: getLastNeo4jSync() }); }
+});
+
+router.post("/neo4j/sync", requireRoles("ADMIN"), async (_req, res) => {
+  try { return res.json({ status: "completed", sync: await syncNeo4jGraph() }); }
+  catch (error) { console.error("Neo4j graph synchronization failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(503).json({ service: "neo4j", status: "unavailable", error: "Neo4j graph synchronization failed; no source data was modified" }); }
 });
 
 async function withMongo<T>(operation: (collection: ReturnType<import("mongodb").Db["collection"]>) => Promise<T>): Promise<T> {
@@ -97,5 +109,14 @@ router.post("/artifacts", requireRoles("ANALYST", "ADMIN"), async (req, res) => 
   } catch (error) { console.error("MongoDB artifact persistence failed", error); return res.status(503).json({ service: "mongodb", status: "unavailable", error: "MongoDB artifact storage is unavailable" }); }
 });
 
-router.get("/graph/evidence/:id", async (req, res) => { const configured = getNeo4jSettings(); const id = Number(req.params.id); if (!configured.settings) return res.status(503).json({ service: "neo4j", status: "configuration_incomplete", missing: configured.missing }); if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: "Invalid evidence ID" }); const driver = neo4j.driver(configured.settings.uri, neo4j.auth.basic(configured.settings.user, configured.settings.password), { connectionTimeout: 1500, disableLosslessIntegers: true }); const session = driver.session({ database: configured.settings.database, defaultAccessMode: neo4j.session.READ }); try { const result = await session.run("MATCH (e:Evidence {evidence_id: $id})-[r]-(linked) RETURN type(r) AS relationship, labels(linked) AS labels, linked.stable_id AS stable_id, linked.name AS name LIMIT 100", { id }); return res.json({ relationships: result.records.map((record) => record.toObject()) }); } catch (error) { console.error("Neo4j graph lookup failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(503).json({ service: "neo4j", status: "unavailable", error: "Neo4j authentication or read-only graph query failed" }); } finally { await session.close(); await driver.close(); } });
+async function graphResponse(rootLabel: "Case" | "Evidence", req: any, res: any) {
+  const configured = getNeo4jSettings(); const id = Number(req.params.id);
+  if (!configured.settings) return res.status(503).json({ service: "neo4j", status: "configuration_incomplete", missing: configured.missing });
+  if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: `Invalid ${rootLabel.toLowerCase()} ID` });
+  try { return res.json(await readGraph(rootLabel, id, req.query.depth, req.query.limit)); }
+  catch (error) { console.error("Neo4j graph lookup failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(503).json({ service: "neo4j", status: "unavailable", error: "Neo4j authentication or read-only graph query failed" }); }
+}
+
+router.get("/graph/evidence/:id", (req, res) => graphResponse("Evidence", req, res));
+router.get("/graph/case/:id", (req, res) => graphResponse("Case", req, res));
 export default router;
