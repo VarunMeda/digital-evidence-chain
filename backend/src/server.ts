@@ -11,6 +11,8 @@ import analysisRouter from "./routes/analysis";
 import auditRouter from "./routes/audit";
 import integrationsRouter from "./routes/integrations";
 import operationsRouter from "./routes/operations";
+import fs from "node:fs/promises";
+import { config } from "./config";
 
 dotenv.config();
 
@@ -48,4 +50,14 @@ app.use("/api/audit", auditRouter);
 app.use("/api/integrations", integrationsRouter);
 app.use("/api/operations", operationsRouter);
 
-if (process.env.NODE_ENV !== "test") app.listen(PORT, () => console.log(`Digital Evidence Chain API running at http://localhost:${PORT}`));
+app.use((error: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (error?.code === "LIMIT_FILE_SIZE") return res.status(413).json({ error: "Uploaded file exceeds the configured size limit" });
+  if (error?.message === "Invalid filename") return res.status(400).json({ error: "Invalid evidence filename" });
+  console.error("Unhandled API error", error);
+  return res.status(500).json({ error: "Internal server error" });
+});
+
+if (process.env.NODE_ENV !== "test") {
+  fs.mkdir(config.storageRoot, { recursive: true }).catch((error) => console.error("Could not create evidence storage", error));
+  app.listen(PORT, () => console.log(`Digital Evidence Chain API running at http://localhost:${PORT}`));
+}
