@@ -17,7 +17,16 @@ dotenv.config();
 export const app = express();
 const PORT = Number(process.env.PORT) || 4000;
 
-app.use(cors({ origin: process.env.FRONTEND_ORIGIN || "http://localhost:3000" }));
+const configuredFrontendOrigin = process.env.FRONTEND_ORIGIN;
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || origin === configuredFrontendOrigin || (!configuredFrontendOrigin && process.env.NODE_ENV !== "production" && /^https?:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin))) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error("Frontend origin is not allowed"));
+  }
+}));
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/", (_req, res) => {

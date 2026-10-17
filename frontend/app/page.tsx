@@ -16,7 +16,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (!(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(`${API}${path}`, { ...options, headers });
+  let response: Response;
+  try { response = await fetch(`${API}${path}`, { ...options, headers }); }
+  catch { throw new Error(`Cannot reach the API at ${API}. Start the backend with "npm run dev" and reload this page.`); }
   let body: any = null; try { body = await response.json(); } catch { /* empty response */ }
   if (!response.ok) throw new Error(body?.error || `Request failed (${response.status})`);
   return body as T;
