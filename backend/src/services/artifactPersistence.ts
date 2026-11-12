@@ -43,5 +43,8 @@ export async function persistArtifact(body: unknown, createdBy: number) {
       if (!existing) throw error;
       return { document: existing, created: false };
     }
+  }).catch((error) => {
+    if (error instanceof ArtifactPersistenceError) throw error;
+    throw new ArtifactPersistenceError(503, "MongoDB artifact storage is unavailable");
   });
 }
