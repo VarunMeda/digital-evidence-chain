@@ -27,6 +27,8 @@ For a local demonstration with dummy accounts, run `cd backend; npm run seed-dem
 
 If you are currently inside `backend`, use `cd ..\forensic-service` for the Python service—not `cd forensic-service`.
 
+The frontend dev server writes to `.next-dev`, while `npm run build` writes to `.next`. They no longer overwrite each other, so building while the dev server is running no longer produces `Cannot find module './...js'`. If you already have a corrupted `.next` from an earlier run, stop the dev server, delete `.next`, and restart `npm run dev`.
+
 ## Cloud deployment configuration
 
 The frontend environment is evaluated when Next.js is built. For a separate cloud frontend and backend, set `NEXT_PUBLIC_API_URL` in the frontend deployment to the backend's public HTTPS URL, such as `https://api.example.com` or `https://api.example.com/api`, then redeploy the frontend. The client normalizes either form to the `/api` base. Set `FRONTEND_ORIGIN` in the backend deployment to the exact frontend origin, such as `https://app.example.com`, and restart the backend. Do not use `localhost` in cloud environment variables. If both services are served behind the same domain and `/api` is reverse-proxied to Express, the frontend can use its same-origin `/api` fallback.
