@@ -9,7 +9,7 @@ import { requireAuth, requireRoles } from "../middleware/auth";
 import { hashStoredFile } from "../services/hashing";
 import { writeAudit } from "../services/audit";
 import { validateEvidenceFile } from "../services/evidenceValidation";
-import { canAccessCase, caseIdForEvidence, requireCaseAccess } from "../services/caseAccess";
+import { canAccessCase, caseIdForEvidence, requireCaseAccess, revokeCustodyOnlyMembership } from "../services/caseAccess";
 import { queueEvidenceGraphSync } from "../services/neo4jGraph";
 
 const router = Router();
@@ -204,8 +204,10 @@ router.post("/:id/transfer", requireRoles("CUSTODIAN", "INVESTIGATOR", "ADMIN"),
   try {
     await pool.query("CALL sp_transfer_custody(?, ?, ?, ?, ?, ?)", [id, req.user!.userId, toUser, req.user!.userId, req.body.reason?.trim() || null, req.body.location?.trim() || null]);
     await pool.execute("INSERT IGNORE INTO case_members (case_id, user_id, access_level, added_by) VALUES (?, ?, 'VIEW', ?)", [caseId, toUser, req.user!.userId]).catch((error) => console.error("Could not grant case access to the new custodian", error));
+    const accessRevoked = await revokeCustodyOnlyMembership(caseId, req.user!.userId).catch((error) => { console.error("Could not revoke the previous custodian's case access", error); return false; });
+    if (accessRevoked) await writeAudit(req.user!.userId, "CASE_ACCESS_REVOKED", "CASE", caseId, { user_id: req.user!.userId, reason: "CUSTODY_TRANSFERRED" }).catch((error) => console.error("Case access revocation audit failed", error));
     queueEvidenceGraphSync(id);
-    return res.json({ evidence_id: id, current_custodian: toUser, status: "IN_CUSTODY" });
+    return res.json({ evidence_id: id, current_custodian: toUser, status: "IN_CUSTODY", access_revoked: accessRevoked });
   } catch (error: any) {
     const message = String(error?.sqlMessage || error?.message || "");
     if (message.includes("not found")) return res.status(404).json({ error: message });
