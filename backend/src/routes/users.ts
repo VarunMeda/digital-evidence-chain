@@ -4,6 +4,15 @@ import { requireAuth, requireRoles } from "../middleware/auth";
 import pool from "../db/mysql";
 import { writeAudit } from "../services/audit";
 const router = Router();
+router.get("/assignable", requireAuth, async (_req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT user_id, full_name, email, role, status FROM users WHERE status = 'ACTIVE' ORDER BY full_name");
+    return res.json(rows);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: "Failed to load assignable users" });
+  }
+});
 router.get("/custodians", requireAuth, async (_req, res) => {
   try {
     const [rows] = await pool.query("SELECT user_id, full_name, email FROM users WHERE role = 'CUSTODIAN' AND status = 'ACTIVE' ORDER BY full_name");

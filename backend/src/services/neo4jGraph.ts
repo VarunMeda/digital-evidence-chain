@@ -1,5 +1,5 @@
 import pool from "../db/mysql";
-import { withNeo4jSession } from "./neo4j";
+import { getNeo4jSettings, withNeo4jSession } from "./neo4j";
 import type { Session } from "neo4j-driver";
 
 type Row = Record<string, any>;
@@ -99,4 +99,63 @@ export async function readGraphWithSession(session: Pick<Session, "run">, rootLa
       for (const rel of record.get("path_relationships") || []) relationships.set(`${rel.type}:${rel.from}:${rel.to}:${JSON.stringify(rel.properties || {})}`, rel);
     }
     return { root: graphId, depth, limit, nodes: [...nodes.values()], relationships: [...relationships.values()], last_sync: lastSync };
+}
+
+export type EvidenceGraphSyncResult = { evidence_id: number; synced: boolean; reason?: string };
+
+async function rows(sql: string, params: any[] = []): Promise<Row[]> {
+  const [result] = await pool.execute<any[]>(sql, params);
+  return result;
+}
+
+export async function syncEvidenceGraph(evidenceId: number): Promise<EvidenceGraphSyncResult> {
+  const evidence = await rows("SELECT evidence_id, evidence_code, case_id, evidence_name, evidence_type, original_filename, file_size_bytes, original_sha256, current_custodian, status, registered_by, collected_at, registered_at FROM evidence WHERE evidence_id = ?", [evidenceId]);
+  if (!evidence.length) return { evidence_id: evidenceId, synced: false, reason: "evidence_not_found" };
+  const [cases, custody, analysis] = await Promise.all([
+    rows("SELECT case_id, case_number, title, description, status, created_by, created_at, closed_at FROM cases WHERE case_id = ?", [evidence[0].case_id]),
+    rows("SELECT custody_id, evidence_id, event_type, from_user, to_user, performed_by, reason, location, event_time FROM custody_records WHERE evidence_id = ?", [evidenceId]),
+    rows("SELECT analysis_id, evidence_id, analyst_id, analysis_type, description, status, result_summary, started_at, completed_at, created_at FROM analysis_records WHERE evidence_id = ?", [evidenceId]),
+  ]);
+
+  const userIds = new Set<number>();
+  const addUser = (value: unknown) => { if (value !== null && value !== undefined) userIds.add(Number(value)); };
+  addUser(evidence[0].registered_by);
+  addUser(evidence[0].current_custodian);
+  for (const row of custody) { addUser(row.from_user); addUser(row.to_user); addUser(row.performed_by); }
+  for (const row of analysis) addUser(row.analyst_id);
+  const userResult = userIds.size ? await pool.query<any[]>("SELECT user_id, full_name, email, role, status FROM users WHERE user_id IN (?)", [Array.from(userIds)]) : null;
+  const users: Row[] = userResult ? userResult[0] : [];
+
+  const nodes: GraphRecord[] = [
+    ...cases.map((row) => graphNode(`case:${row.case_id}`, "Case", { case_id: row.case_id, case_number: row.case_number, title: row.title, description: row.description, status: row.status, created_by: row.created_by, created_at: iso(row.created_at), closed_at: iso(row.closed_at) })),
+    ...evidence.map((row) => graphNode(`evidence:${row.evidence_id}`, "Evidence", { evidence_id: row.evidence_id, evidence_code: row.evidence_code, case_id: row.case_id, name: row.evidence_name, evidence_type: row.evidence_type, original_filename: row.original_filename, file_size_bytes: row.file_size_bytes, original_sha256: row.original_sha256, current_custodian: row.current_custodian, status: row.status, registered_by: row.registered_by, collected_at: iso(row.collected_at), registered_at: iso(row.registered_at) })),
+    ...users.map((row) => graphNode(`person:${row.user_id}`, "Person", { user_id: row.user_id, name: row.full_name, email: row.email, role: row.role, status: row.status })),
+    ...custody.map((row) => graphNode(`custody:${row.custody_id}`, "CustodyEvent", { custody_id: row.custody_id, evidence_id: row.evidence_id, event_type: row.event_type, from_user: row.from_user, to_user: row.to_user, performed_by: row.performed_by, reason: row.reason, location: row.location, event_time: iso(row.event_time) })),
+    ...analysis.map((row) => graphNode(`analysis:${row.analysis_id}`, "Analysis", { analysis_id: row.analysis_id, evidence_id: row.evidence_id, analyst_id: row.analyst_id, analysis_type: row.analysis_type, description: row.description, status: row.status, result_summary: row.result_summary, started_at: iso(row.started_at), completed_at: iso(row.completed_at), created_at: iso(row.created_at) })),
+  ];
+
+  await withNeo4jSession("WRITE", async (session) => {
+    for (const statement of constraints) await session.run(statement);
+    for (const node of nodes) await session.run(`MERGE (n:${node.label} {graph_id: $graph_id}) SET n = $properties`, node);
+    for (const row of evidence) {
+      await session.run("MATCH (c:Case {graph_id:$caseId}), (e:Evidence {graph_id:$evidenceId}) MERGE (c)-[:HAS_EVIDENCE]->(e)", { caseId: `case:${row.case_id}`, evidenceId: `evidence:${row.evidence_id}` });
+    }
+    for (const row of custody) {
+      await session.run("MATCH (ce:CustodyEvent {graph_id:$custodyId}), (e:Evidence {graph_id:$evidenceId}) MERGE (ce)-[:CONCERNS]->(e)", { custodyId: `custody:${row.custody_id}`, evidenceId: `evidence:${row.evidence_id}` });
+      if (row.performed_by) await session.run("MATCH (p:Person {graph_id:$personId}), (ce:CustodyEvent {graph_id:$custodyId}) MERGE (p)-[:PERFORMED]->(ce)", { personId: `person:${row.performed_by}`, custodyId: `custody:${row.custody_id}` });
+      if (row.event_type === "COLLECTED" && row.to_user) await session.run("MATCH (p:Person {graph_id:$personId}), (e:Evidence {graph_id:$evidenceId}) MERGE (p)-[:COLLECTED]->(e)", { personId: `person:${row.to_user}`, evidenceId: `evidence:${row.evidence_id}` });
+      if (row.event_type === "TRANSFERRED" && row.to_user) await session.run("MATCH (p:Person {graph_id:$personId}), (ce:CustodyEvent {graph_id:$custodyId}) MERGE (p)-[:TRANSFERRED]->(ce)", { personId: `person:${row.to_user}`, custodyId: `custody:${row.custody_id}` });
+    }
+    for (const row of analysis) {
+      await session.run("MATCH (e:Evidence {graph_id:$evidenceId}), (a:Analysis {graph_id:$analysisId}) MERGE (e)-[:HAS_ANALYSIS]->(a)", { evidenceId: `evidence:${row.evidence_id}`, analysisId: `analysis:${row.analysis_id}` });
+      if (row.analyst_id) await session.run("MATCH (p:Person {graph_id:$personId}), (a:Analysis {graph_id:$analysisId}) MERGE (p)-[:PERFORMED]->(a)", { personId: `person:${row.analyst_id}`, analysisId: `analysis:${row.analysis_id}` });
+    }
+  });
+  return { evidence_id: evidenceId, synced: true };
+}
+
+export function queueEvidenceGraphSync(evidenceId: number): void {
+  if (process.env.NODE_ENV === "test") return;
+  if (!getNeo4jSettings().settings) return;
+  syncEvidenceGraph(evidenceId).catch((error) => console.error("Neo4j evidence graph synchronization failed", { evidence_id: evidenceId, name: error instanceof Error ? error.name : "UnknownError" }));
 }

@@ -6,6 +6,7 @@ import { ARTIFACT_TYPES, EXTRACTION_STATUSES } from "../services/artifactValidat
 import { getNeo4jSettings, verifyNeo4jConnection } from "../services/neo4j";
 import { getLastNeo4jSync, Neo4jGraphNotFoundError, readGraph, syncNeo4jGraph } from "../services/neo4jGraph";
 import { ArtifactPersistenceError, persistArtifact } from "../services/artifactPersistence";
+import { accessibleEvidenceIds, caseIdForEvidence, requireCaseAccess } from "../services/caseAccess";
 
 const router = Router();
 router.use(requireAuth);
@@ -69,10 +70,18 @@ router.get("/artifacts", async (req, res) => {
   const extractionStatus = req.query.extraction_status == null ? undefined : String(req.query.extraction_status);
   if (artifactType && !ARTIFACT_TYPES.includes(artifactType as any)) return res.status(400).json({ error: "Unsupported artifact_type" });
   if (extractionStatus && !EXTRACTION_STATUSES.includes(extractionStatus as any)) return res.status(400).json({ error: "Invalid extraction_status" });
+  if (evidenceId !== undefined) {
+    const caseId = await caseIdForEvidence(evidenceId);
+    if (caseId === null) return res.status(404).json({ error: "Evidence not found" });
+    if (!(await requireCaseAccess(req.user!, caseId, res))) return;
+  }
+  const restrictedEvidenceIds = evidenceId === undefined ? await accessibleEvidenceIds(req.user!) : null;
+  if (restrictedEvidenceIds && !restrictedEvidenceIds.length) return res.json({ documents: [], page, page_size: pageSize, total: 0 });
   try {
     const result = await withMongo(async (collection) => {
       const filter: Record<string, unknown> = {};
       if (evidenceId !== undefined) filter.evidence_id = evidenceId;
+      else if (restrictedEvidenceIds !== null) filter.evidence_id = { $in: restrictedEvidenceIds };
       if (artifactType) filter.artifact_type = artifactType;
       if (extractionStatus) filter.extraction_status = extractionStatus;
       const [documents, total] = await Promise.all([
@@ -90,11 +99,20 @@ router.get("/artifacts/:artifactId", async (req, res) => {
   try {
     const document = await withMongo((collection) => collection.findOne({ artifact_id: req.params.artifactId }, { projection: { _id: 0 } }));
     if (!document) return res.status(404).json({ error: "Artifact not found" });
+    const caseId = await caseIdForEvidence(Number(document.evidence_id));
+    if (caseId === null) return res.status(404).json({ error: "Referenced evidence record not found" });
+    if (!(await requireCaseAccess(req.user!, caseId, res))) return;
     return res.json(document);
   } catch (error) { console.error("MongoDB artifact lookup failed", error); return res.status(503).json({ service: "mongodb", status: "unavailable", error: "MongoDB artifact storage is unavailable" }); }
 });
 
 router.post("/artifacts", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
+  const evidenceId = Number(req.body?.evidence_id);
+  if (Number.isSafeInteger(evidenceId) && evidenceId > 0) {
+    const caseId = await caseIdForEvidence(evidenceId);
+    if (caseId === null) return res.status(404).json({ error: "Referenced evidence record not found" });
+    if (!(await requireCaseAccess(req.user!, caseId, res))) return;
+  }
   try { const result = await persistArtifact(req.body, req.user!.userId); return res.status(result.created ? 201 : 200).json(result); }
   catch (error) { if (error instanceof ArtifactPersistenceError) return res.status(error.status).json({ error: error.message }); console.error("MongoDB artifact persistence failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(503).json({ service: "mongodb", status: "unavailable", error: "MongoDB artifact storage is unavailable" }); }
 });
@@ -102,6 +120,9 @@ router.post("/artifacts", requireRoles("ANALYST", "ADMIN"), async (req, res) => 
 async function graphResponse(rootLabel: "Case" | "Evidence", req: any, res: any) {
   const id = Number(req.params.id);
   if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: `Invalid ${rootLabel.toLowerCase()} ID` });
+  const caseId = rootLabel === "Evidence" ? await caseIdForEvidence(id) : id;
+  if (caseId === null) return res.status(404).json({ error: "Evidence not found" });
+  if (!(await requireCaseAccess(req.user!, caseId, res))) return;
   const configured = getNeo4jSettings();
   if (!configured.settings) return res.status(503).json({ service: "neo4j", status: "configuration_incomplete", missing: configured.missing });
   try { return res.json(await readGraph(rootLabel, id, req.query.depth, req.query.limit)); }

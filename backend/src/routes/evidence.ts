@@ -9,6 +9,8 @@ import { requireAuth, requireRoles } from "../middleware/auth";
 import { hashStoredFile } from "../services/hashing";
 import { writeAudit } from "../services/audit";
 import { validateEvidenceFile } from "../services/evidenceValidation";
+import { canAccessCase, caseIdForEvidence, requireCaseAccess } from "../services/caseAccess";
+import { queueEvidenceGraphSync } from "../services/neo4jGraph";
 
 const router = Router();
 router.use(requireAuth);
@@ -29,6 +31,26 @@ const upload = multer({
 });
 
 const idOf = (value: string) => Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
+
+const contentTypes: Record<string, string> = {
+  PDF: "application/pdf", DOC: "application/msword", DOCX: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  TXT: "text/plain; charset=utf-8", LOG: "text/plain; charset=utf-8", CSV: "text/csv; charset=utf-8",
+  JSON: "application/json", XML: "application/xml", JPG: "image/jpeg", JPEG: "image/jpeg", PNG: "image/png",
+  TIFF: "image/tiff", BMP: "image/bmp", MP4: "video/mp4", MOV: "video/quicktime", AVI: "video/x-msvideo",
+  MKV: "video/x-matroska", MP3: "audio/mpeg", WAV: "audio/wav",
+};
+
+function contentTypeFor(evidenceType: string, filename: string): string {
+  const byType = contentTypes[evidenceType.trim().toUpperCase()];
+  if (byType) return byType;
+  const extension = path.extname(filename).replace(".", "").toUpperCase();
+  return contentTypes[extension] || "application/octet-stream";
+}
+
+function safeFilename(filename: string, fallback: string): string {
+  const cleaned = filename.replace(/[^\x20-\x7E]/g, "_").replace(/["\\\r\n]/g, "_").trim();
+  return (cleaned || fallback).slice(0, 180);
+}
 
 class RequestError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -60,6 +82,13 @@ router.post("/", requireRoles("INVESTIGATOR", "ADMIN"), upload.single("evidence"
       throw new RequestError(400, "case_id, evidence_name, evidence_type, and a file are required");
     }
     if (req.body.evidence_name.trim().length > 255) throw new RequestError(400, "Evidence name is too long");
+
+    const [caseRows] = await pool.execute<any[]>("SELECT case_id FROM cases WHERE case_id = ?", [caseId]);
+    if (!caseRows.length) throw new RequestError(404, "Case not found");
+    if (!(await canAccessCase(req.user!, caseId))) {
+      await writeAudit(req.user!.userId, "CASE_ACCESS_DENIED", "CASE", caseId, { action: "EVIDENCE_REGISTRATION" }).catch(() => undefined);
+      throw new RequestError(403, "You do not have access to this case");
+    }
 
     const detectedType = await validateEvidenceFile(file.path, file.originalname, config.maxUploadBytes).catch((error) => {
       throw new RequestError(400, error instanceof Error ? error.message : "Unsupported evidence file");
@@ -99,6 +128,7 @@ router.post("/", requireRoles("INVESTIGATOR", "ADMIN"), upload.single("evidence"
     commitAttempted = true;
     await connection.commit();
     transactionStarted = false;
+    queueEvidenceGraphSync(result.insertId);
     return res.status(201).json({ evidence_id: result.insertId, evidence_code: code, original_filename: path.basename(file.originalname), file_size_bytes: file.size, original_sha256: digest, evidence_type: detectedType, status: "REGISTERED" });
   } catch (error) {
     if (transactionStarted && connection) await connection.rollback().catch((rollbackError) => console.error("Evidence rollback failed", rollbackError));
@@ -120,7 +150,15 @@ router.post("/", requireRoles("INVESTIGATOR", "ADMIN"), upload.single("evidence"
 
 router.get("/", async (req, res) => {
   const caseId = req.query.case_id ? idOf(String(req.query.case_id)) : null;
-  const [rows] = await pool.execute("SELECT evidence_id, evidence_code, case_id, evidence_name, evidence_type, original_filename, file_size_bytes, original_sha256, current_custodian, status, registered_by, registered_at FROM evidence WHERE (? IS NULL OR case_id = ?) ORDER BY registered_at DESC", [caseId, caseId]);
+  const isAdmin = req.user!.role === "ADMIN";
+  const [rows] = await pool.execute(
+    `SELECT e.evidence_id, e.evidence_code, e.case_id, e.evidence_name, e.evidence_type, e.original_filename, e.file_size_bytes, e.original_sha256, e.current_custodian, e.status, e.registered_by, e.registered_at
+     FROM evidence e
+     WHERE (? IS NULL OR e.case_id = ?)
+       AND (? = 1 OR e.case_id IN (SELECT m.case_id FROM case_members m WHERE m.user_id = ?))
+     ORDER BY e.registered_at DESC`,
+    [caseId, caseId, isAdmin ? 1 : 0, req.user!.userId],
+  );
   res.json(rows);
 });
 
@@ -129,18 +167,44 @@ router.get("/:id", async (req, res) => {
   if (!id) return res.status(400).json({ error: "Invalid evidence ID" });
   const [rows] = await pool.execute<any[]>("SELECT evidence_id, evidence_code, case_id, evidence_name, evidence_type, description, original_filename, file_size_bytes, original_sha256, current_custodian, status, registered_by, registered_at FROM evidence WHERE evidence_id = ?", [id]);
   if (!rows.length) return res.status(404).json({ error: "Evidence not found" });
+  if (!(await requireCaseAccess(req.user!, Number(rows[0].case_id), res))) return;
   const [custody] = await pool.execute("SELECT * FROM custody_records WHERE evidence_id = ? ORDER BY event_time DESC", [id]);
   const [analysis] = await pool.execute("SELECT * FROM analysis_records WHERE evidence_id = ? ORDER BY created_at DESC", [id]);
   const [alerts] = await pool.execute("SELECT * FROM integrity_alerts WHERE evidence_id = ? ORDER BY detected_at DESC", [id]);
   return res.json({ ...rows[0], custody, analysis, integrity_alerts: alerts });
 });
 
+router.get("/:id/download", async (req, res) => {
+  const id = idOf(String(req.params.id));
+  if (!id) return res.status(400).json({ error: "Invalid evidence ID" });
+  const [rows] = await pool.execute<any[]>("SELECT case_id, storage_path, original_filename, evidence_type FROM evidence WHERE evidence_id = ?", [id]);
+  if (!rows.length) return res.status(404).json({ error: "Evidence not found" });
+  if (!(await requireCaseAccess(req.user!, Number(rows[0].case_id), res))) return;
+  const root = path.resolve(config.storageRoot);
+  const resolved = path.resolve(rows[0].storage_path);
+  if (resolved === root || !resolved.startsWith(`${root}${path.sep}`)) return res.status(404).json({ error: "Evidence file not found" });
+  try { await fs.access(resolved); } catch { return res.status(404).json({ error: "Evidence file not found" }); }
+  const contentType = contentTypeFor(String(rows[0].evidence_type || ""), String(rows[0].original_filename || ""));
+  const inline = req.query.inline === "1" && contentType !== "application/octet-stream";
+  await writeAudit(req.user!.userId, "EVIDENCE_FILE_ACCESSED", "EVIDENCE", id, { inline, content_type: contentType }).catch((error) => console.error("Evidence access audit failed", error));
+  res.setHeader("Content-Type", contentType);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("Content-Disposition", `${inline ? "inline" : "attachment"}; filename="${safeFilename(String(rows[0].original_filename || ""), `evidence-${id}`)}"`);
+  res.sendFile(resolved, (error) => { if (error && !res.headersSent) res.status(404).json({ error: "Evidence file not found" }); });
+});
+
 router.post("/:id/transfer", requireRoles("CUSTODIAN", "INVESTIGATOR", "ADMIN"), async (req, res) => {
   const id = idOf(String(req.params.id));
   const toUser = idOf(req.body?.to_user_id);
   if (!id || !toUser || toUser === req.user!.userId) return res.status(400).json({ error: "Valid different destination custodian is required" });
+  const caseId = await caseIdForEvidence(id);
+  if (caseId === null) return res.status(404).json({ error: "Evidence not found" });
+  if (!(await requireCaseAccess(req.user!, caseId, res))) return;
   try {
     await pool.query("CALL sp_transfer_custody(?, ?, ?, ?, ?, ?)", [id, req.user!.userId, toUser, req.user!.userId, req.body.reason?.trim() || null, req.body.location?.trim() || null]);
+    await pool.execute("INSERT IGNORE INTO case_members (case_id, user_id, access_level, added_by) VALUES (?, ?, 'VIEW', ?)", [caseId, toUser, req.user!.userId]).catch((error) => console.error("Could not grant case access to the new custodian", error));
+    queueEvidenceGraphSync(id);
     return res.json({ evidence_id: id, current_custodian: toUser, status: "IN_CUSTODY" });
   } catch (error: any) {
     const message = String(error?.sqlMessage || error?.message || "");
@@ -154,8 +218,9 @@ router.post("/:id/transfer", requireRoles("CUSTODIAN", "INVESTIGATOR", "ADMIN"),
 router.post("/:id/verify", requireRoles("ANALYST", "ADMIN", "CUSTODIAN"), async (req, res) => {
   const id = idOf(String(req.params.id));
   if (!id) return res.status(400).json({ error: "Invalid evidence ID" });
-  const [rows] = await pool.execute<any[]>("SELECT storage_path, original_sha256 FROM evidence WHERE evidence_id = ?", [id]);
+  const [rows] = await pool.execute<any[]>("SELECT case_id, storage_path, original_sha256 FROM evidence WHERE evidence_id = ?", [id]);
   if (!rows.length) return res.status(404).json({ error: "Evidence not found" });
+  if (!(await requireCaseAccess(req.user!, Number(rows[0].case_id), res))) return;
   let actual: string;
   try {
     actual = await hashStoredFile(rows[0].storage_path);
@@ -182,6 +247,7 @@ router.post("/:id/verify", requireRoles("ANALYST", "ADMIN", "CUSTODIAN"), async 
       await writeAudit(req.user!.userId, "INTEGRITY_VERIFIED", "EVIDENCE", id, { sha256: actual }, connection);
     }
     await connection.commit();
+    queueEvidenceGraphSync(id);
     return res.json({ evidence_id: id, matches, expected_sha256: locked[0].original_sha256, actual_sha256: actual });
   } catch (error) {
     await connection.rollback().catch((rollbackError) => console.error("Integrity rollback failed", rollbackError));

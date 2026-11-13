@@ -45,6 +45,10 @@ async function ensureEvidence(code: string, caseId: number, name: string, custod
   return { evidence_id: result.insertId, original_sha256: digest };
 }
 
+async function ensureMember(caseId: number, userId: number, accessLevel: "VIEW" | "MANAGE"): Promise<void> {
+  await pool.execute("INSERT IGNORE INTO case_members (case_id, user_id, access_level, added_by) VALUES (?, ?, ?, ?)", [caseId, userId, accessLevel, userId]);
+}
+
 async function ensureAnalysis(evidenceId: number, analystId: number, status: string, type: string, summary: string): Promise<void> {
   const [existing] = await pool.execute<any[]>("SELECT analysis_id FROM analysis_records WHERE evidence_id=? AND analysis_type=? LIMIT 1", [evidenceId, type]);
   if (existing.length) return;
@@ -72,6 +76,12 @@ async function main(): Promise<void> {
   const custodianTwo = users.get("custodian.two@example.test")!;
   const readyCase = await ensureCase("DEC-DEMO-001", "Local evidence workflow", "A safe synthetic case for demonstrating the complete dashboard workflow.", investigator.user_id);
   const alertCase = await ensureCase("DEC-DEMO-002", "Integrity alert workflow", "A synthetic case containing an intentionally open demonstration alert.", investigator.user_id);
+  await ensureMember(readyCase.case_id, investigator.user_id, "MANAGE");
+  await ensureMember(readyCase.case_id, analyst.user_id, "VIEW");
+  await ensureMember(readyCase.case_id, custodianOne.user_id, "VIEW");
+  await ensureMember(alertCase.case_id, investigator.user_id, "MANAGE");
+  await ensureMember(alertCase.case_id, analyst.user_id, "VIEW");
+  await ensureMember(alertCase.case_id, custodianTwo.user_id, "VIEW");
   const readyEvidence = await ensureEvidence("EV-DEMO-001", readyCase.case_id, "Synthetic incident notes", custodianOne.user_id, investigator.user_id, "Synthetic evidence for local dashboard testing.\nThis is not real evidence.\n");
   const alertEvidence = await ensureEvidence("EV-DEMO-002", alertCase.case_id, "Synthetic altered notes", custodianTwo.user_id, investigator.user_id, "Synthetic evidence prepared for the integrity-alert demonstration.\n");
   await ensureAnalysis(readyEvidence.evidence_id, analyst.user_id, "COMPLETED", "Demo timeline review", "Synthetic timeline review completed.");

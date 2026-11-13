@@ -54,7 +54,9 @@ test("evidence lifecycle integration", { skip: !testDatabase }, async () => {
   }
   async function makeCase(label: string) {
     const [result] = await pool.execute<any>("INSERT INTO cases (case_number, title, created_by) VALUES (?, ?, ?)", [`TEST-${runId}-${label}`, `Lifecycle ${label}`, users.investigator.userId]);
-    return result.insertId as number;
+    const caseId = result.insertId as number;
+    await pool.execute("INSERT IGNORE INTO case_members (case_id, user_id, access_level, added_by) VALUES (?, ?, 'MANAGE', ?)", [caseId, users.investigator.userId, users.investigator.userId]);
+    return caseId;
   }
   async function makeEvidence(caseId: number, status = "REGISTERED", currentCustodian: number | null = users.investigator.userId) {
     const bytes = Buffer.from(`fixture-${runId}-${caseId}-${status}`);
@@ -73,6 +75,7 @@ test("evidence lifecycle integration", { skip: !testDatabase }, async () => {
     users.custodian3 = await makeUser("CUSTODIAN");
     users.inactiveCustodian = await makeUser("CUSTODIAN", "INACTIVE");
     const caseId = await makeCase("upload");
+    await pool.execute("INSERT IGNORE INTO case_members (case_id, user_id, access_level, added_by) VALUES (?, ?, 'VIEW', ?)", [caseId, users.analyst.userId, users.investigator.userId]);
     const investigatorHeaders = auth(users.investigator);
     const custodianHeaders = auth(users.custodian1);
     const analystHeaders = auth(users.analyst);

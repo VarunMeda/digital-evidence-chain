@@ -5,6 +5,8 @@ import { writeAudit } from "../services/audit";
 import { hashStoredFile } from "../services/hashing";
 import { runMetadataExtractor } from "../services/metadataExtractor";
 import { ArtifactPersistenceError, persistArtifact } from "../services/artifactPersistence";
+import { requireCaseAccess } from "../services/caseAccess";
+import { queueEvidenceGraphSync } from "../services/neo4jGraph";
 
 const router = Router();
 router.use(requireAuth);
@@ -15,8 +17,17 @@ const safeFailure = (error: unknown) => error instanceof ArtifactPersistenceErro
 router.get("/", async (req, res) => {
   const evidenceId = req.query.evidence_id == null ? null : idOf(req.query.evidence_id);
   if (req.query.evidence_id != null && !evidenceId) return res.status(400).json({ error: "Invalid evidence_id" });
-  try { const [rows] = await pool.execute("SELECT * FROM analysis_records WHERE (? IS NULL OR evidence_id=?) ORDER BY created_at DESC", [evidenceId, evidenceId]); return res.json(rows); }
-  catch (error) { console.error("Analysis lookup failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(500).json({ error: "Failed to retrieve analysis records" }); }
+  try {
+    const isAdmin = req.user!.role === "ADMIN";
+    const [rows] = await pool.execute(
+      `SELECT a.* FROM analysis_records a JOIN evidence e ON e.evidence_id = a.evidence_id
+       WHERE (? IS NULL OR a.evidence_id = ?)
+         AND (? = 1 OR e.case_id IN (SELECT m.case_id FROM case_members m WHERE m.user_id = ?))
+       ORDER BY a.created_at DESC`,
+      [evidenceId, evidenceId, isAdmin ? 1 : 0, req.user!.userId],
+    );
+    return res.json(rows);
+  } catch (error) { console.error("Analysis lookup failed", { name: error instanceof Error ? error.name : "UnknownError" }); return res.status(500).json({ error: "Failed to retrieve analysis records" }); }
 });
 
 router.post("/", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
@@ -24,8 +35,9 @@ router.post("/", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
   if (!evidenceId || typeof type !== "string" || !type.trim()) return res.status(400).json({ error: "evidence_id and analysis_type are required" });
   const connection = await pool.getConnection();
   try {
-    const [evidence] = await connection.execute<any[]>("SELECT evidence_id FROM evidence WHERE evidence_id=? LIMIT 1", [evidenceId]);
+    const [evidence] = await connection.execute<any[]>("SELECT evidence_id, case_id FROM evidence WHERE evidence_id=? LIMIT 1", [evidenceId]);
     if (!evidence.length) return res.status(404).json({ error: "Evidence not found" });
+    if (!(await requireCaseAccess(req.user!, Number(evidence[0].case_id), res))) return;
     await connection.beginTransaction();
     const [result] = await connection.execute<any>("INSERT INTO analysis_records (evidence_id, analyst_id, analysis_type, description, status, started_at) VALUES (?, ?, ?, ?, 'PENDING', NULL)", [evidenceId, req.user!.userId, type.trim(), typeof req.body.description === "string" ? req.body.description.trim() || null : null]);
     await writeAudit(req.user!.userId, "ANALYSIS_CREATED", "ANALYSIS", result.insertId, { evidence_id: evidenceId, analysis_type: type.trim() }, connection);
@@ -36,8 +48,9 @@ router.post("/", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
 
 router.post("/:id/run", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
   const id = idOf(req.params.id); if (!id) return res.status(400).json({ error: "Invalid analysis ID" });
-  const [rows] = await pool.execute<any[]>("SELECT a.analysis_id, a.evidence_id, a.analyst_id, a.analysis_type, a.status, e.original_filename, e.storage_path, e.original_sha256, e.evidence_type FROM analysis_records a JOIN evidence e ON e.evidence_id=a.evidence_id WHERE a.analysis_id=? LIMIT 1", [id]);
+  const [rows] = await pool.execute<any[]>("SELECT a.analysis_id, a.evidence_id, a.analyst_id, a.analysis_type, a.status, e.case_id, e.original_filename, e.storage_path, e.original_sha256, e.evidence_type FROM analysis_records a JOIN evidence e ON e.evidence_id=a.evidence_id WHERE a.analysis_id=? LIMIT 1", [id]);
   if (!rows.length) return res.status(404).json({ error: "Analysis record not found" });
+  if (!(await requireCaseAccess(req.user!, Number(rows[0].case_id), res))) return;
   const analysis = rows[0];
   if (req.user!.role !== "ADMIN" && analysis.analyst_id !== req.user!.userId) return res.status(403).json({ error: "Analysis is assigned to another analyst" });
   if (analysis.status === "IN_PROGRESS") return res.status(409).json({ error: "Analysis is already in progress" });
@@ -60,6 +73,7 @@ router.post("/:id/run", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
     const summary = `Metadata extraction completed (${extraction.artifact_type}) using ${extraction.parser.name} ${extraction.parser.version}`;
     const connection = await pool.getConnection();
     try { await connection.beginTransaction(); await connection.execute("UPDATE analysis_records SET status='COMPLETED', result_summary=?, completed_at=CURRENT_TIMESTAMP WHERE analysis_id=?", [summary, id]); await writeAudit(req.user!.userId, "ANALYSIS_COMPLETED", "ANALYSIS", id, { evidence_id: analysis.evidence_id, artifact_id: persisted.document.artifact_id, artifact_type: extraction.artifact_type, input_sha256: actualHash }, connection); await connection.commit(); } catch (error) { await connection.rollback().catch(() => undefined); throw error; } finally { connection.release(); }
+    queueEvidenceGraphSync(analysis.evidence_id);
     return res.json({ analysis_id: id, evidence_id: analysis.evidence_id, status: "COMPLETED", artifact: persisted.document });
   } catch (error) {
     const message = safeFailure(error);
@@ -74,6 +88,9 @@ router.post("/:id/run", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
 router.patch("/:id", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
   const id = idOf(req.params.id); const status = req.body?.status;
   if (!id || !["PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"].includes(status)) return res.status(400).json({ error: "Invalid analysis status" });
+  const [accessRows] = await pool.execute<any[]>("SELECT e.case_id FROM analysis_records a JOIN evidence e ON e.evidence_id = a.evidence_id WHERE a.analysis_id = ?", [id]);
+  if (!accessRows.length) return res.status(404).json({ error: "Analysis record not found" });
+  if (!(await requireCaseAccess(req.user!, Number(accessRows[0].case_id), res))) return;
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction(); const isAdmin = req.user!.role === "ADMIN";

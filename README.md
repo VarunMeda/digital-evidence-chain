@@ -18,7 +18,7 @@ MySQL remains the source of truth for users, cases, evidence, custody, analysis,
 ## Run on Windows PowerShell
 
 1. Copy `backend/.env.example` to `backend/.env` and fill in local values. Never commit `.env`.
-2. Apply the existing database bootstrap, then run `database/mysql/001_advanced_features.sql` once.
+2. Apply the existing database bootstrap, then run `database/mysql/001_advanced_features.sql`, `002_lifecycle_hardening.sql`, and `003_case_access_control.sql` once each.
 3. Start the API: `cd backend; npm install; npm run dev`.
 4. From the repository root, start the dashboard: `cd ..\frontend; npm install; npm run dev`.
 5. From the repository root, install the extractor dependency and run the Python tests: `cd ..\forensic-service; .\.venv\Scripts\python.exe -m pip install -r requirements.txt; .\.venv\Scripts\python.exe -m unittest discover -s . -p 'test_*.py'`.
@@ -49,13 +49,23 @@ The first administrator must be bootstrapped out-of-band with a bcrypt/Argon2 ha
 POST /api/auth/login                  {"email":"admin@example.test","password":"..."}
 GET  /api/cases                       Authorization: Bearer <token>
 POST /api/cases                       {"case_number":"DEC-2026-002","title":"Demo case"}
+GET  /api/cases/:id/members           case members and access levels
+POST /api/cases/:id/members           {"user_id":2,"access_level":"VIEW"|"MANAGE"}
+DELETE /api/cases/:id/members/:userId removes a user's case access
 POST /api/evidence (multipart/form-data) case_id, evidence_name, evidence_type, evidence file
+GET  /api/evidence/:id/download       streams the stored file to a case member (?inline=1 to display)
 POST /api/evidence/:id/transfer       {"to_user_id":2,"reason":"Examination"}
 POST /api/evidence/:id/verify         recalculates stored bytes and preserves the original hash
 POST /api/analysis                    {"evidence_id":1,"analysis_type":"Timeline review"}
 POST /api/analysis/:id/run            runs safe metadata extraction and stores the result
 PATCH /api/cases/:id/status           {"status":"CLOSED"}
 ```
+
+## Case-scoped access control
+
+`case_members` makes case access explicit. Administrators can open every case; every other account only receives cases listed in `case_members` for their `user_id`. Case creators are granted `MANAGE`, while evidence registrants, custodians, and analysts are provisioned as `VIEW` members by the migration triggers. `MANAGE` members and administrators can grant or revoke access; `VIEW` members can read the case, its evidence metadata and file, custody history, analysis records, artifacts, and graph. List endpoints, dashboard totals, artifacts, and Neo4j reads are all filtered by the same membership rule. Denied attempts are written to the immutable audit log as `CASE_ACCESS_DENIED`, and successful file access is recorded as `EVIDENCE_FILE_ACCESSED`.
+
+Artifacts are derived forensic metadata, not the uploaded evidence document. They appear only after an analyst runs an analysis (`POST /api/analysis/:id/run`) or submits one through `POST /api/integrations/artifacts`. The Neo4j graph now synchronizes the affected evidence automatically after registration, custody transfer, integrity verification, and completed analysis. A full `npm run sync-neo4j` (or the admin sync endpoint) is still useful after bulk imports, manual SQL changes, or if Neo4j was unavailable while an event occurred.
 
 ## MongoDB forensic artifacts
 
