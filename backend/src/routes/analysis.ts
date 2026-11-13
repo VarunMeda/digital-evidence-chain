@@ -55,7 +55,6 @@ router.post("/:id/run", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
   if (rows[0].case_status === "CLOSED") return res.status(409).json({ error: "Case is closed. Reopen it before running analysis." });
   const analysis = rows[0];
   if (req.user!.role !== "ADMIN" && analysis.analyst_id !== req.user!.userId) return res.status(403).json({ error: "Analysis is assigned to another analyst" });
-  if (analysis.status === "IN_PROGRESS") return res.status(409).json({ error: "Analysis is already in progress" });
   if (analysis.status === "COMPLETED") return res.json({ analysis_id: id, evidence_id: analysis.evidence_id, status: "COMPLETED", message: "Analysis is already completed" });
 
   const startConnection = await pool.getConnection();
