@@ -9,7 +9,7 @@ import { requireAuth, requireRoles } from "../middleware/auth";
 import { hashStoredFile } from "../services/hashing";
 import { writeAudit } from "../services/audit";
 import { validateEvidenceFile } from "../services/evidenceValidation";
-import { canAccessCase, caseIdForEvidence, requireCaseAccess, revokeCustodyOnlyMembership } from "../services/caseAccess";
+import { canAccessCase, requireCaseAccess, revokeCustodyOnlyMembership } from "../services/caseAccess";
 import { queueEvidenceGraphSync } from "../services/neo4jGraph";
 
 const router = Router();
@@ -198,9 +198,13 @@ router.post("/:id/transfer", requireRoles("CUSTODIAN", "INVESTIGATOR", "ADMIN"),
   const id = idOf(String(req.params.id));
   const toUser = idOf(req.body?.to_user_id);
   if (!id || !toUser || toUser === req.user!.userId) return res.status(400).json({ error: "Valid different destination custodian is required" });
-  const caseId = await caseIdForEvidence(id);
-  if (caseId === null) return res.status(404).json({ error: "Evidence not found" });
+  const [evidenceRows] = await pool.execute<any[]>("SELECT e.case_id, e.current_custodian, u.full_name AS current_custodian_name FROM evidence e LEFT JOIN users u ON u.user_id = e.current_custodian WHERE e.evidence_id = ?", [id]);
+  if (!evidenceRows.length) return res.status(404).json({ error: "Evidence not found" });
+  const caseId = Number(evidenceRows[0].case_id);
   if (!(await requireCaseAccess(req.user!, caseId, res))) return;
+  if (Number(evidenceRows[0].current_custodian) !== req.user!.userId) {
+    return res.status(409).json({ error: evidenceRows[0].current_custodian_name ? `Only the current custodian can transfer this evidence. It is currently held by ${evidenceRows[0].current_custodian_name}.` : "Only the current custodian can transfer this evidence." });
+  }
   try {
     await pool.query("CALL sp_transfer_custody(?, ?, ?, ?, ?, ?)", [id, req.user!.userId, toUser, req.user!.userId, req.body.reason?.trim() || null, req.body.location?.trim() || null]);
     await pool.execute("INSERT IGNORE INTO case_members (case_id, user_id, access_level, added_by) VALUES (?, ?, 'VIEW', ?)", [caseId, toUser, req.user!.userId]).catch((error) => console.error("Could not grant case access to the new custodian", error));
