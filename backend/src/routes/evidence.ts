@@ -83,8 +83,9 @@ router.post("/", requireRoles("INVESTIGATOR", "ADMIN"), upload.single("evidence"
     }
     if (req.body.evidence_name.trim().length > 255) throw new RequestError(400, "Evidence name is too long");
 
-    const [caseRows] = await pool.execute<any[]>("SELECT case_id FROM cases WHERE case_id = ?", [caseId]);
+    const [caseRows] = await pool.execute<any[]>("SELECT case_id, status FROM cases WHERE case_id = ?", [caseId]);
     if (!caseRows.length) throw new RequestError(404, "Case not found");
+    if (caseRows[0].status === "CLOSED") throw new RequestError(409, "Case is closed. Reopen it before registering evidence.");
     if (!(await canAccessCase(req.user!, caseId))) {
       await writeAudit(req.user!.userId, "CASE_ACCESS_DENIED", "CASE", caseId, { action: "EVIDENCE_REGISTRATION" }).catch(() => undefined);
       throw new RequestError(403, "You do not have access to this case");
@@ -168,7 +169,7 @@ router.get("/:id", async (req, res) => {
   const [rows] = await pool.execute<any[]>("SELECT evidence_id, evidence_code, case_id, evidence_name, evidence_type, description, original_filename, file_size_bytes, original_sha256, current_custodian, status, registered_by, registered_at FROM evidence WHERE evidence_id = ?", [id]);
   if (!rows.length) return res.status(404).json({ error: "Evidence not found" });
   if (!(await requireCaseAccess(req.user!, Number(rows[0].case_id), res))) return;
-  const [custody] = await pool.execute("SELECT * FROM custody_records WHERE evidence_id = ? ORDER BY event_time DESC", [id]);
+  const [custody] = await pool.execute("SELECT * FROM v_custody_history WHERE evidence_id = ? ORDER BY event_time DESC", [id]);
   const [analysis] = await pool.execute("SELECT * FROM analysis_records WHERE evidence_id = ? ORDER BY created_at DESC", [id]);
   const [alerts] = await pool.execute("SELECT * FROM integrity_alerts WHERE evidence_id = ? ORDER BY detected_at DESC", [id]);
   return res.json({ ...rows[0], custody, analysis, integrity_alerts: alerts });
@@ -198,10 +199,11 @@ router.post("/:id/transfer", requireRoles("CUSTODIAN", "INVESTIGATOR", "ADMIN"),
   const id = idOf(String(req.params.id));
   const toUser = idOf(req.body?.to_user_id);
   if (!id || !toUser || toUser === req.user!.userId) return res.status(400).json({ error: "Valid different destination custodian is required" });
-  const [evidenceRows] = await pool.execute<any[]>("SELECT e.case_id, e.current_custodian, u.full_name AS current_custodian_name FROM evidence e LEFT JOIN users u ON u.user_id = e.current_custodian WHERE e.evidence_id = ?", [id]);
+  const [evidenceRows] = await pool.execute<any[]>("SELECT e.case_id, e.current_custodian, u.full_name AS current_custodian_name, c.status AS case_status FROM evidence e LEFT JOIN users u ON u.user_id = e.current_custodian JOIN cases c ON c.case_id = e.case_id WHERE e.evidence_id = ?", [id]);
   if (!evidenceRows.length) return res.status(404).json({ error: "Evidence not found" });
   const caseId = Number(evidenceRows[0].case_id);
   if (!(await requireCaseAccess(req.user!, caseId, res))) return;
+  if (evidenceRows[0].case_status === "CLOSED") return res.status(409).json({ error: "Case is closed. Reopen it before transferring custody." });
   if (Number(evidenceRows[0].current_custodian) !== req.user!.userId) {
     return res.status(409).json({ error: evidenceRows[0].current_custodian_name ? `Only the current custodian can transfer this evidence. It is currently held by ${evidenceRows[0].current_custodian_name}.` : "Only the current custodian can transfer this evidence." });
   }

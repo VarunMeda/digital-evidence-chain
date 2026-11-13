@@ -35,9 +35,10 @@ router.post("/", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
   if (!evidenceId || typeof type !== "string" || !type.trim()) return res.status(400).json({ error: "evidence_id and analysis_type are required" });
   const connection = await pool.getConnection();
   try {
-    const [evidence] = await connection.execute<any[]>("SELECT evidence_id, case_id FROM evidence WHERE evidence_id=? LIMIT 1", [evidenceId]);
+    const [evidence] = await connection.execute<any[]>("SELECT e.evidence_id, e.case_id, c.status AS case_status FROM evidence e JOIN cases c ON c.case_id = e.case_id WHERE e.evidence_id=? LIMIT 1", [evidenceId]);
     if (!evidence.length) return res.status(404).json({ error: "Evidence not found" });
     if (!(await requireCaseAccess(req.user!, Number(evidence[0].case_id), res))) return;
+    if (evidence[0].case_status === "CLOSED") return res.status(409).json({ error: "Case is closed. Reopen it before creating analysis." });
     await connection.beginTransaction();
     const [result] = await connection.execute<any>("INSERT INTO analysis_records (evidence_id, analyst_id, analysis_type, description, status, started_at) VALUES (?, ?, ?, ?, 'PENDING', NULL)", [evidenceId, req.user!.userId, type.trim(), typeof req.body.description === "string" ? req.body.description.trim() || null : null]);
     await writeAudit(req.user!.userId, "ANALYSIS_CREATED", "ANALYSIS", result.insertId, { evidence_id: evidenceId, analysis_type: type.trim() }, connection);
@@ -48,9 +49,10 @@ router.post("/", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
 
 router.post("/:id/run", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
   const id = idOf(req.params.id); if (!id) return res.status(400).json({ error: "Invalid analysis ID" });
-  const [rows] = await pool.execute<any[]>("SELECT a.analysis_id, a.evidence_id, a.analyst_id, a.analysis_type, a.status, e.case_id, e.original_filename, e.storage_path, e.original_sha256, e.evidence_type FROM analysis_records a JOIN evidence e ON e.evidence_id=a.evidence_id WHERE a.analysis_id=? LIMIT 1", [id]);
+  const [rows] = await pool.execute<any[]>("SELECT a.analysis_id, a.evidence_id, a.analyst_id, a.analysis_type, a.status, e.case_id, e.original_filename, e.storage_path, e.original_sha256, e.evidence_type, c.status AS case_status FROM analysis_records a JOIN evidence e ON e.evidence_id=a.evidence_id JOIN cases c ON c.case_id=e.case_id WHERE a.analysis_id=? LIMIT 1", [id]);
   if (!rows.length) return res.status(404).json({ error: "Analysis record not found" });
   if (!(await requireCaseAccess(req.user!, Number(rows[0].case_id), res))) return;
+  if (rows[0].case_status === "CLOSED") return res.status(409).json({ error: "Case is closed. Reopen it before running analysis." });
   const analysis = rows[0];
   if (req.user!.role !== "ADMIN" && analysis.analyst_id !== req.user!.userId) return res.status(403).json({ error: "Analysis is assigned to another analyst" });
   if (analysis.status === "IN_PROGRESS") return res.status(409).json({ error: "Analysis is already in progress" });
@@ -88,9 +90,10 @@ router.post("/:id/run", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
 router.patch("/:id", requireRoles("ANALYST", "ADMIN"), async (req, res) => {
   const id = idOf(req.params.id); const status = req.body?.status;
   if (!id || !["PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"].includes(status)) return res.status(400).json({ error: "Invalid analysis status" });
-  const [accessRows] = await pool.execute<any[]>("SELECT e.case_id FROM analysis_records a JOIN evidence e ON e.evidence_id = a.evidence_id WHERE a.analysis_id = ?", [id]);
+  const [accessRows] = await pool.execute<any[]>("SELECT e.case_id, c.status AS case_status FROM analysis_records a JOIN evidence e ON e.evidence_id = a.evidence_id JOIN cases c ON c.case_id = e.case_id WHERE a.analysis_id = ?", [id]);
   if (!accessRows.length) return res.status(404).json({ error: "Analysis record not found" });
   if (!(await requireCaseAccess(req.user!, Number(accessRows[0].case_id), res))) return;
+  if (accessRows[0].case_status === "CLOSED") return res.status(409).json({ error: "Case is closed. Reopen it before changing analysis." });
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction(); const isAdmin = req.user!.role === "ADMIN";

@@ -61,7 +61,7 @@ router.get("/:id/members", async (req, res) => {
   if (!(await requireCaseAccess(req.user!, id, res))) return;
   try {
     const [rows] = await pool.execute<any[]>(
-      "SELECT m.user_id, m.access_level, m.added_at, u.full_name, u.email, u.role, u.status FROM case_members m JOIN users u ON u.user_id = m.user_id WHERE m.case_id = ? ORDER BY u.full_name",
+      "SELECT m.user_id, m.access_level, m.added_at, u.full_name, u.email, u.role, u.status, (SELECT COUNT(*) FROM evidence e WHERE e.case_id = m.case_id AND e.current_custodian = m.user_id) AS evidence_held FROM case_members m JOIN users u ON u.user_id = m.user_id WHERE m.case_id = ? ORDER BY u.full_name",
       [id],
     );
     return res.json(rows);
@@ -103,6 +103,8 @@ router.delete("/:id/members/:userId", async (req, res) => {
   if (!cases.length) return res.status(404).json({ error: "Case not found" });
   if (userId === req.user!.userId) return res.status(409).json({ error: "You cannot remove your own case access" });
   if (Number(cases[0].created_by) === userId && req.user!.role !== "ADMIN") return res.status(409).json({ error: "Only an administrator can remove the case creator" });
+  const [heldRows] = await pool.execute<any[]>("SELECT COUNT(*) AS held FROM evidence WHERE case_id = ? AND current_custodian = ?", [id, userId]);
+  if (Number(heldRows[0].held) > 0) return res.status(409).json({ error: "Transfer the evidence this user currently holds before removing their case access" });
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
